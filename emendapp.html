@@ -5003,11 +5003,11 @@ ${fromBody}`;
 (() => {
   'use strict';
 
-  const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.2.4';
+  const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
 
   const MODELS = {
     fast: { id: 'onnx-community/Qwen2.5-0.5B-Instruct', label: 'Fast', meta: '400MB', dtype: 'q4' },
-    better: { id: 'onnx-community/Qwen2.5-1.5B-Instruct', label: 'Better', meta: '1GB, higher quality', dtype: 'q4' },
+    better: { id: 'HuggingFaceTB/SmolLM2-1.7B-Instruct', label: 'Better', meta: '1.1GB, higher quality', dtype: 'q4f16' },
   };
 
   const TONES = [
