@@ -4929,12 +4929,25 @@ ${fromBody}`;
     const hunks = buildAiHunks(originalSlice, correctedText);
     state.lints = state.lints.filter((l) => l.kind !== 'AI');
     if (hunks) {
+      // The AI pass rewrites the whole slice from scratch, so it routinely
+      // "rediscovers" fixes Harper already caught (a typo, a grammar slip)
+      // on top of whatever it's actually adding. Showing both as separate
+      // cards for the same span is just clutter, not extra value — so skip
+      // an AI hunk when an existing (non-AI) lint already covers that span
+      // with the exact same replacement text.
+      const harperLints = state.lints;
       for (const h of hunks) {
+        const start = h.start + baseOffset;
+        const end = h.end + baseOffset;
+        const newNorm = h.newText.trim().toLowerCase();
+        const dupesHarper = harperLints.some((l) => l.start <= end && l.end >= start
+          && l.suggestions.some((s) => s.trim().toLowerCase() === newNorm));
+        if (dupesHarper) continue;
         aiHunkSeq += 1;
         state.lints.push({
           id: 1e6 + aiHunkSeq, // well clear of Harper's own small per-lint ids
-          start: h.start + baseOffset,
-          end: h.end + baseOffset,
+          start,
+          end,
           problemText: h.oldText,
           kind: 'AI',
           kindPretty: 'AI',
