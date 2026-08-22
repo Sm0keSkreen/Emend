@@ -4991,7 +4991,15 @@ ${fromBody}`;
    same way Harper's own checks do — as accept/dismiss cards in the
    suggestions list. The model downloads automatically in the background as
    soon as the page loads (no extra step to opt in), and everything runs
-   on-device; nothing leaves the browser. */
+   on-device; nothing leaves the browser.
+
+   Model loading and text generation both run inside a dedicated Web Worker
+   (see WORKER_SRC below) rather than on the main thread. transformers.js's
+   WASM backend does real, synchronous-feeling heavy lifting for both steps;
+   run in-page, that freezes the UI (the editor stops responding, buttons
+   don't visually update) for as long as it takes. Moving it into a worker
+   keeps the page interactive throughout, and lets the main thread show live
+   progress instead of guessing whether it's still working. */
 (() => {
   'use strict';
 
@@ -5019,52 +5027,234 @@ ${fromBody}`;
   const toneRow = $('#aiToneRow');
   const checkBtn = $('#checkBtn');
 
+  // Remembers, for this browser tab only, that Better failed to load once
+  // and we should go straight to Fast on future page loads without
+  // retrying it. (Belt-and-suspenders: the in-memory state.betterUnavailable
+  // flag below is what actually drives this session's behavior; this just
+  // carries the same decision across a manual page refresh.)
   const SKIP_BETTER_KEY = 'emend-ai-skip-better';
   let skipBetter = false;
-  try { skipBetter = sessionStorage.getItem(SKIP_BETTER_KEY) === '1'; } catch {}
+  try { skipBetter = sessionStorage.getItem(SKIP_BETTER_KEY) === '1'; } catch { /* storage unavailable; ignore */ }
+
   const state = {
     modelKey: skipBetter ? 'fast' : 'better',
     tone: 'deepfix',
-    device: null,        // resolved lazily by pickDevice()
-    pipelines: {},        // modelKey -> loaded pipeline
-    loadPromises: {},     // modelKey -> in-flight load promise, so concurrent callers share one download
-    loading: null,        // modelKey currently downloading, or null
+    pipelinesReady: {},    // modelKey -> true once loaded in the current worker
+    loadPromises: {},      // modelKey -> in-flight load promise, so concurrent callers share one download
+    loading: null,         // modelKey currently downloading, or null
     loadingPct: null,
-    loadError: null,       // modelKey that most recently failed to load
+    loadError: null,       // modelKey that most recently failed to load (and isn't the better->fast handoff)
     checking: false,
+    genTokens: 0,
+    genMaxTokens: 0,
+    betterUnavailable: skipBetter, // set once Better is confirmed to fail on this device
   };
-  let transformersMod = null;
 
-  /** `'gpu' in navigator` only means the browser ships the WebGPU API
-   *  surface — it says nothing about whether a real adapter is available.
-   *  Plenty of real environments (remote/sandboxed browsers, some Linux
-   *  setups, VMs, older GPUs) expose navigator.gpu but fail to get an
-   *  adapter, and transformers.js does not fall back on its own: it just
-   *  throws. Probe for a real adapter before trusting it. */
-  let devicePromise = null;
-  async function pickDevice() {
-    if (!devicePromise) {
-      devicePromise = (async () => {
-        if (!('gpu' in navigator)) return 'wasm';
-        try {
-          const adapter = await navigator.gpu.requestAdapter();
-          return adapter ? 'webgpu' : 'wasm';
-        } catch {
-          return 'wasm';
-        }
-      })();
+  /* --------------------------- Worker plumbing --------------------------- */
+  // Everything transformers.js-related (model download, session creation,
+  // token generation) happens inside this worker's own thread. The main
+  // thread only ever exchanges small JSON messages with it.
+  const WORKER_SRC = `
+    let transformersMod = null;
+    const pipelines = {};
+    let devicePromise = null;
+
+    async function pickDevice() {
+      if (!('gpu' in self.navigator)) return 'wasm';
+      try {
+        const adapter = await self.navigator.gpu.requestAdapter();
+        return adapter ? 'webgpu' : 'wasm';
+      } catch {
+        return 'wasm';
+      }
     }
-    return devicePromise;
+
+    async function loadPipeline(modelId, dtype, device, onProgress) {
+      if (!transformersMod) {
+        transformersMod = await import(${JSON.stringify(TRANSFORMERS_CDN)});
+        // See the matching comment in the old main-thread version of this
+        // file: forcing single-threaded WASM avoids onnxruntime-web sizing
+        // its memory arena for a cross-origin-isolated thread count that
+        // isn't actually available, which otherwise fails the very first
+        // allocation on machines with plenty of free RAM.
+        transformersMod.env.backends.onnx.wasm.numThreads = 1;
+      }
+      return transformersMod.pipeline('text-generation', modelId, {
+        dtype, device, progress_callback: onProgress,
+      });
+    }
+
+    self.onmessage = async (e) => {
+      const msg = e.data;
+      if (msg.type === 'loadModel') {
+        const { key, modelId, dtype } = msg;
+        try {
+          if (!devicePromise) devicePromise = pickDevice();
+          let device = await devicePromise;
+          const files = {};
+          const onProgress = (p) => {
+            if (p.status === 'progress' && p.file) {
+              files[p.file] = p;
+              let loaded = 0, total = 0;
+              for (const f of Object.values(files)) { loaded += f.loaded || 0; total += f.total || 0; }
+              self.postMessage({ type: 'loadProgress', key, pct: total ? Math.round((loaded / total) * 100) : 0 });
+            }
+          };
+          let generator;
+          try {
+            generator = await loadPipeline(modelId, dtype, device, onProgress);
+          } catch (err) {
+            if (device !== 'wasm') {
+              device = 'wasm';
+              generator = await loadPipeline(modelId, dtype, 'wasm', onProgress);
+            } else {
+              throw err;
+            }
+          }
+          pipelines[key] = generator;
+          self.postMessage({ type: 'loadDone', key });
+        } catch (err) {
+          self.postMessage({ type: 'loadError', key, message: String((err && err.message) || err) });
+        }
+      } else if (msg.type === 'generate') {
+        const { reqId, key, messages, genOpts } = msg;
+        try {
+          const pipe = pipelines[key];
+          if (!pipe) throw new Error('model not loaded: ' + key);
+          const streamer = new transformersMod.TextStreamer(pipe.tokenizer, {
+            skip_prompt: true,
+            skip_special_tokens: true,
+            callback_function: (chunk) => {
+              self.postMessage({ type: 'genProgress', reqId });
+            },
+          });
+          const result = await pipe(messages, Object.assign({}, genOpts, { streamer }));
+          let text = result && result[0] && result[0].generated_text;
+          if (Array.isArray(text)) text = (text[text.length - 1] && text[text.length - 1].content) || '';
+          self.postMessage({ type: 'genDone', reqId, text });
+        } catch (err) {
+          self.postMessage({ type: 'genError', reqId, message: String((err && err.message) || err) });
+        }
+      }
+    };
+  `;
+
+  let worker = null;
+  let workerReqSeq = 0;
+  const pendingGen = new Map(); // reqId -> { resolve, reject, onProgress }
+
+  function makeWorker() {
+    const blob = new Blob([WORKER_SRC], { type: 'text/javascript' });
+    const url = URL.createObjectURL(blob);
+    const w = new Worker(url, { type: 'module' });
+    URL.revokeObjectURL(url);
+    w.onmessage = onWorkerMessage;
+    w.onerror = (err) => console.error('AI worker error:', err);
+    return w;
   }
+  worker = makeWorker();
+
+  function onWorkerMessage(e) {
+    const msg = e.data;
+    if (msg.type === 'loadProgress') {
+      if (state.loading === msg.key) { state.loadingPct = msg.pct; updateCheckBtn(); }
+    } else if (msg.type === 'loadDone') {
+      state.pipelinesReady[msg.key] = true;
+      settleLoad(msg.key, null);
+    } else if (msg.type === 'loadError') {
+      settleLoad(msg.key, msg.message);
+    } else if (msg.type === 'genProgress') {
+      const p = pendingGen.get(msg.reqId);
+      if (p) p.onProgress();
+    } else if (msg.type === 'genDone') {
+      const p = pendingGen.get(msg.reqId);
+      if (p) { pendingGen.delete(msg.reqId); p.resolve(msg.text); }
+    } else if (msg.type === 'genError') {
+      const p = pendingGen.get(msg.reqId);
+      if (p) { pendingGen.delete(msg.reqId); p.reject(new Error(msg.message)); }
+    }
+  }
+
+  const loadResolvers = {}; // key -> { resolve, reject }
+  function settleLoad(key, errMessage) {
+    const resolver = loadResolvers[key];
+    delete loadResolvers[key];
+    if (errMessage && key === 'better' && !state.betterUnavailable) {
+      // The higher-quality model can fail outright on some devices — its
+      // real memory footprint is just bigger than what's available there.
+      // A failed allocation leaves onnxruntime-web's WASM memory maxed out
+      // (WebAssembly.Memory can grow but never shrink), so retrying Fast in
+      // that SAME worker would fail identically even though Fast loads fine
+      // on its own. Ditch the poisoned worker for a fresh one instead of
+      // reloading the whole page — no lost editor text, no jarring reload.
+      console.warn('Better model failed to load; switching to Fast in a fresh worker:', errMessage);
+      state.betterUnavailable = true;
+      try { sessionStorage.setItem(SKIP_BETTER_KEY, '1'); } catch { /* storage unavailable; ignore */ }
+      worker.terminate();
+      worker = makeWorker();
+      state.modelKey = 'fast';
+      // renderModelOptions() marks Better "Unavailable on this device" from
+      // here on — that's the durable explanation. A one-off flashCheckBtn()
+      // notice isn't used here: whatever caller is awaiting this (the
+      // background preload, or doCheck() itself) immediately drives the
+      // button into "Loading AI…"/"Checking…" right after, so a flashed
+      // message would just get overwritten within a few hundred ms anyway.
+      renderModelOptions();
+      ensureModel('fast').then(
+        () => { if (resolver) resolver.resolve(); },
+        (err) => { if (resolver) resolver.reject(err); },
+      );
+      return;
+    }
+    if (errMessage) {
+      state.loadError = key;
+      updateCheckBtn();
+      if (resolver) resolver.reject(new Error(errMessage));
+    } else if (resolver) {
+      resolver.resolve();
+    }
+  }
+
+  function ensureModel(key) {
+    if (state.pipelinesReady[key]) return Promise.resolve();
+    if (state.loadPromises[key]) return state.loadPromises[key];
+    const m = MODELS[key];
+    state.loading = key;
+    state.loadingPct = null;
+    state.loadError = null;
+    updateCheckBtn();
+    const promise = new Promise((resolve, reject) => { loadResolvers[key] = { resolve, reject }; });
+    worker.postMessage({ type: 'loadModel', key, modelId: m.id, dtype: m.dtype });
+    const tracked = promise.finally(() => {
+      if (state.loading === key) state.loading = null;
+      delete state.loadPromises[key];
+      updateCheckBtn();
+    });
+    state.loadPromises[key] = tracked;
+    return tracked;
+  }
+
+  function runGenerate(key, messages, genOpts, onProgress) {
+    return new Promise((resolve, reject) => {
+      const reqId = ++workerReqSeq;
+      pendingGen.set(reqId, { resolve, reject, onProgress });
+      worker.postMessage({ type: 'generate', reqId, key, messages, genOpts });
+    });
+  }
+
+  /* -------------------------------- UI ------------------------------------ */
 
   function currentTone() { return TONES.find((t) => t.id === state.tone) || TONES[0]; }
 
   function renderModelOptions() {
     modelList.innerHTML = '';
     Object.entries(MODELS).forEach(([key, m]) => {
+      const unavailable = key === 'better' && state.betterUnavailable;
       const div = document.createElement('div');
-      div.className = 'model-option' + (state.modelKey === key ? ' selected' : '');
-      div.innerHTML = `<span class="name">${m.label}</span><span class="meta">${m.meta}</span>`;
+      div.className = 'model-option'
+        + (state.modelKey === key ? ' selected' : '')
+        + (unavailable ? ' unavailable' : '');
+      div.innerHTML = `<span class="name">${m.label}</span><span class="meta">${unavailable ? 'Unavailable on this device' : m.meta}</span>`;
       div.addEventListener('click', () => selectModel(key));
       modelList.appendChild(div);
     });
@@ -5082,10 +5272,22 @@ ${fromBody}`;
   }
 
   function selectModel(key) {
+    if (key === 'better' && state.betterUnavailable) {
+      flashCheckBtn("Better isn't supported on this device — staying on Fast.");
+      return;
+    }
     state.modelKey = key;
     renderModelOptions();
     updateCheckBtn();
-    if (!state.pipelines[key] && state.loading !== key) ensureModel(key).catch(() => {});
+    if (!state.pipelinesReady[key] && state.loading !== key) ensureModel(key).catch(() => {});
+  }
+
+  // Briefly shows a message in place of the Check button's normal label,
+  // then reverts — used for one-off notices (a model switch, a length
+  // guard) without needing a separate toast/notification UI.
+  function flashCheckBtn(message, ms = 2200) {
+    checkBtn.textContent = message;
+    setTimeout(updateCheckBtn, ms);
   }
 
   function updateCheckBtn() {
@@ -5094,104 +5296,17 @@ ${fromBody}`;
       checkBtn.textContent = state.loadingPct != null ? `Loading AI ${state.loadingPct}%` : 'Loading AI…';
     } else if (state.checking) {
       checkBtn.disabled = true;
-      checkBtn.textContent = 'Checking…';
-    } else if (state.loadError === state.modelKey && !state.pipelines[state.modelKey]) {
+      const pct = state.genMaxTokens
+        ? Math.min(99, Math.round((state.genTokens / state.genMaxTokens) * 100))
+        : null;
+      checkBtn.textContent = pct != null ? `Checking… ${pct}%` : 'Checking…';
+    } else if (state.loadError === state.modelKey && !state.pipelinesReady[state.modelKey]) {
       checkBtn.disabled = false;
       checkBtn.textContent = 'Retry AI';
     } else {
       checkBtn.disabled = false;
       checkBtn.textContent = 'Check';
     }
-  }
-
-  async function loadPipeline(m, device, onProgress) {
-    if (!transformersMod) {
-      transformersMod = await import(/* webpackIgnore: true */ TRANSFORMERS_CDN);
-      // onnxruntime-web's WASM backend sizes its memory arena assuming it can
-      // spread work across navigator.hardwareConcurrency threads. Real
-      // multi-threaded WASM requires the page to be cross-origin isolated
-      // (a real SharedArrayBuffer available), which is rarely true for a
-      // single static HTML file opened directly or served from a plain CDN.
-      // When it isn't, but the arena is still sized for many threads, the
-      // very first session-creation allocation can fail outright with
-      // "failed to allocate a buffer of size ..." -- on machines with plenty
-      // of free RAM, not just constrained ones. Forcing single-threaded WASM
-      // avoids that miscalculation; confirmed live to fix loading entirely
-      // on a 24-core machine where multi-threaded sizing failed every time.
-      transformersMod.env.backends.onnx.wasm.numThreads = 1;
-    }
-    return transformersMod.pipeline('text-generation', m.id, {
-      dtype: m.dtype,
-      device,
-      progress_callback: onProgress,
-    });
-  }
-
-  function ensureModel(key) {
-    if (state.pipelines[key]) return Promise.resolve(state.pipelines[key]);
-    if (state.loadPromises[key]) return state.loadPromises[key];
-    const m = MODELS[key];
-    state.loading = key;
-    state.loadingPct = null;
-    state.loadError = null;
-    updateCheckBtn();
-    const files = {};
-    const onProgress = (p) => {
-      if (p.status === 'progress' && p.file) {
-        files[p.file] = p;
-        let loaded = 0, total = 0;
-        for (const f of Object.values(files)) { loaded += f.loaded || 0; total += f.total || 0; }
-        state.loadingPct = total ? Math.round((loaded / total) * 100) : 0;
-        updateCheckBtn();
-      }
-    };
-    const promise = (async () => {
-      try {
-        if (!state.device) state.device = await pickDevice();
-        let generator;
-        try {
-          generator = await loadPipeline(m, state.device, onProgress);
-        } catch (err) {
-          // A probed-good WebGPU adapter can still fail at actual pipeline
-          // creation time (driver quirks, memory limits, etc). Don't let a
-          // GPU-only failure take down the whole feature — retry once on
-          // WASM, which works everywhere, before giving up.
-          if (state.device !== 'wasm') {
-            console.warn('WebGPU pipeline failed, retrying on wasm:', err);
-            state.device = 'wasm';
-            state.loadingPct = null;
-            generator = await loadPipeline(m, 'wasm', onProgress);
-          } else {
-            throw err;
-          }
-        }
-        state.pipelines[key] = generator;
-        return generator;
-      } catch (err) {
-        console.error(err);
-        // The higher-quality model can still fail outright on some devices
-        // even with single-threaded WASM (its real memory footprint is just
-        // bigger) -- confirmed live: after the threading fix, "better" still
-        // failed to allocate ~1.8GB on a machine where "fast" loaded fine.
-        // Rather than leave Check permanently dead, drop to the smaller
-        // model automatically so AI Check still works.
-        if (key === 'better') {
-          console.warn('Better failed; reloading to try Fast fresh:', err);
-          try { sessionStorage.setItem(SKIP_BETTER_KEY, '1'); } catch {}
-          checkBtn.textContent = 'Switching to Fast\u2026';
-          location.reload();
-          return new Promise(() => {});
-        }
-        state.loadError = key;
-        throw err;
-      } finally {
-        state.loading = null;
-        delete state.loadPromises[key];
-        updateCheckBtn();
-      }
-    })();
-    state.loadPromises[key] = promise;
-    return promise;
   }
 
   /** The model is told to reply with only the corrected text, but small
@@ -5220,22 +5335,24 @@ ${fromBody}`;
     const source = hasSel ? editor.value.slice(editor.selectionStart, editor.selectionEnd) : editor.value;
     if (!source.trim()) return;
     if (source.length > MAX_CHECK_LENGTH) {
-      const prev = checkBtn.textContent;
-      checkBtn.textContent = 'Text too long';
-      setTimeout(updateCheckBtn, 1600);
+      flashCheckBtn('Text too long', 1600);
       return;
     }
-    let pipe;
     try {
-      pipe = await ensureModel(state.modelKey);
+      await ensureModel(state.modelKey);
     } catch {
       return; // updateCheckBtn() already reflects the failure ("Retry AI")
     }
+    const tone = currentTone();
+    const isFix = tone.id === 'deepfix';
+    const genOpts = isFix
+      ? { max_new_tokens: 512, temperature: 0.15, do_sample: false }
+      : { max_new_tokens: 512, temperature: 0.7, do_sample: true };
     state.checking = true;
+    state.genTokens = 0;
+    state.genMaxTokens = genOpts.max_new_tokens;
     updateCheckBtn();
     try {
-      const tone = currentTone();
-      const isFix = tone.id === 'deepfix';
       const messages = [
         { role: 'system', content: 'Reply with only the corrected/rewritten text. No preamble, no quotes, no explanation of what changed.' },
         { role: 'user', content: `${tone.instruction}\n\nTEXT:\n${source}` },
@@ -5243,12 +5360,12 @@ ${fromBody}`;
       // Deep Fix is a correction pass, not creative writing: use low-temperature,
       // near-greedy decoding so it doesn't introduce new wording on top of the
       // actual errors. The stylistic tones keep some sampling for natural variety.
-      const genOpts = isFix
-        ? { max_new_tokens: 512, temperature: 0.15, do_sample: false }
-        : { max_new_tokens: 512, temperature: 0.7, do_sample: true };
-      const result = await pipe(messages, genOpts);
-      let text = result?.[0]?.generated_text;
-      if (Array.isArray(text)) text = text.at(-1)?.content ?? '';
+      // state.modelKey may have changed since we started (a failed Better load
+      // switches to Fast above), so re-read it now rather than use a stale copy.
+      const text = await runGenerate(state.modelKey, messages, genOpts, () => {
+        state.genTokens += 1;
+        updateCheckBtn();
+      });
       const corrected = stripPreamble((text || '').trim());
       if (corrected) window.__app.applyAiHunks(source, corrected, baseOffset);
     } catch (err) {
