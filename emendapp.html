@@ -4342,6 +4342,16 @@ ${fromBody}`;
   const GROUP_LABEL = { correctness: 'Correctness', clarity: 'Clarity', engagement: 'Engagement', ai: 'AI' };
   function groupOf(kind) { return KIND_GROUP[kind] || 'engagement'; }
 
+  /** Harper's lint_kind_pretty() is supposed to return a human-friendly
+   *  label (e.g. "Word Choice"), but for at least one kind (BoundaryError)
+   *  it returns the raw, unspaced enum name instead. Detect that case and
+   *  space it out ourselves rather than showing "BoundaryError" verbatim. */
+  function humanizeKind(pretty, kind) {
+    const looksRaw = pretty && (pretty === kind || (!pretty.includes(' ') && /[a-z][A-Z]/.test(pretty)));
+    if (!looksRaw) return pretty;
+    return pretty.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  }
+
   /** Harper occasionally flags a subject/verb "be" mismatch (Agreement)
    *  without offering a fix. Rather than show an error with nothing to do
    *  about it, guess the correct form from the subject just before it. */
@@ -4469,7 +4479,7 @@ ${fromBody}`;
           end: span.end,
           problemText,
           kind,
-          kindPretty: l.lint_kind_pretty(),
+          kindPretty: humanizeKind(l.lint_kind_pretty(), kind),
           message: l.message(),
           suggestions,
           _raw: { lint: l, suggestions: rawForApply },
