@@ -4996,8 +4996,11 @@ ${fromBody}`;
   const toneRow = $('#aiToneRow');
   const checkBtn = $('#checkBtn');
 
+  const SKIP_BETTER_KEY = 'emend-ai-skip-better';
+  let skipBetter = false;
+  try { skipBetter = sessionStorage.getItem(SKIP_BETTER_KEY) === '1'; } catch {}
   const state = {
-    modelKey: 'better',
+    modelKey: skipBetter ? 'fast' : 'better',
     tone: 'deepfix',
     device: null,        // resolved lazily by pickDevice()
     pipelines: {},        // modelKey -> loaded pipeline
@@ -5150,15 +5153,11 @@ ${fromBody}`;
         // Rather than leave Check permanently dead, drop to the smaller
         // model automatically so AI Check still works.
         if (key === 'better') {
-          console.warn('Better model failed to load, falling back to Fast:', err);
-          state.modelKey = 'fast';
-          renderModelOptions();
-          try {
-            return await ensureModel('fast');
-          } catch (fallbackErr) {
-            state.loadError = 'fast';
-            throw fallbackErr;
-          }
+          console.warn('Better failed; reloading to try Fast fresh:', err);
+          try { sessionStorage.setItem(SKIP_BETTER_KEY, '1'); } catch {}
+          checkBtn.textContent = 'Switching to Fast\u2026';
+          location.reload();
+          return new Promise(() => {});
         }
         state.loadError = key;
         throw err;
