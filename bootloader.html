@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+  Emend bootloader
+  -----------------
+  This is the tiny snippet — paste this wherever you need a live copy of
+  Emend (any HTML-accepting box: an online previewer, a CodePen, a wiki
+  embed, whatever). It doesn't contain the app itself; it just points an
+  iframe at the real build hosted on GitHub via the jsDelivr CDN, so the
+  actual ~400KB app (plus the ~16MB Harper WASM engine it loads on its
+  own) never has to be pasted anywhere by hand.
+
+  If you ever rename the repo, move branches, or want to pin an exact
+  commit/tag instead of always tracking @main, just change SRC below —
+  everything else stays the same.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emend</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0b0f14; }
+  iframe { display: block; width: 100%; height: 100%; border: 0; }
+</style>
+</head>
+<body>
+<iframe
+  src="https://cdn.jsdelivr.net/gh/Sm0keSkreen/Emend@main/emend-app.html"
+  title="Emend — offline spelling & grammar checker"
+  allow="clipboard-read; clipboard-write"
+></iframe>
+</body>
+</html>
