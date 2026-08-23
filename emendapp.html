@@ -333,9 +333,11 @@ select#dialect{
   padding:10px 12px;
   border-bottom:1px solid var(--border);
   flex-shrink:0;
+  flex-wrap:wrap;
+  row-gap:6px;
 }
-.suggestions-header b{font-size:13px;font-weight:600;color:var(--text);}
-.suggestions-header-actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+.suggestions-header b{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;}
+.suggestions-header-actions{display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:nowrap;}
 .suggestions-list{
   flex:1;
   min-height:0;
