@@ -214,8 +214,6 @@ select#dialect{
   display:flex;
   gap:14px;
   padding:14px 18px;
-  max-width:1500px;
-  margin:0 auto;
   width:100%;
 }
 .editor-panel{
@@ -337,6 +335,7 @@ select#dialect{
   flex-shrink:0;
 }
 .suggestions-header b{font-size:13px;font-weight:600;color:var(--text);}
+.suggestions-header-actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
 .suggestions-list{
   flex:1;
   min-height:0;
@@ -480,7 +479,6 @@ select#fontSelect{
       <div class="editor-toolbar">
         <button class="btn ghost" id="sampleBtn">Sample</button>
         <button class="btn ghost" id="clearBtn">Clear</button>
-        <button class="btn ai ai-progress-btn" id="checkBtn"><span class="ai-progress-fill" id="aiProgressFill"></span><span class="ai-progress-label" id="aiProgressLabel">Check</span></button>
         <div class="spacer"></div>
         <label class="upload-btn">Upload<input type="file" id="uploadInput" hidden accept=".txt,.md,text/plain"></label>
         <button class="btn" id="downloadBtn">Download</button>
@@ -503,7 +501,10 @@ select#fontSelect{
     <aside class="suggestions-panel">
       <div class="suggestions-header">
         <b id="issueCount">Ready to check</b>
-        <button class="btn small" id="acceptAllBtn" disabled>Accept all</button>
+        <div class="suggestions-header-actions">
+          <button class="btn ai ai-progress-btn small" id="checkBtn"><span class="ai-progress-fill" id="aiProgressFill"></span><span class="ai-progress-label" id="aiProgressLabel">Deep Check</span></button>
+          <button class="btn small" id="acceptAllBtn" disabled>Accept all</button>
+        </div>
       </div>
       <div class="suggestions-list" id="suggestionsList"></div>
       <div class="empty-state" id="emptyState">Ready to check</div>
@@ -5381,7 +5382,7 @@ ${fromBody}`;
     } else {
       checkBtn.disabled = false;
       setProgressFill(0);
-      aiProgressLabel.textContent = 'Check';
+      aiProgressLabel.textContent = 'Deep Check';
     }
   }
 
