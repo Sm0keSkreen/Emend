@@ -5038,14 +5038,17 @@ ${fromBody}`;
   const CDN_REPO = 'https://cdn.jsdelivr.net/gh/Sm0keSkreen/emend-models@main/';
 
   const MODELS = {
-    fast: { id: 'onnx-community/Qwen2.5-0.5B-Instruct', label: 'Fast', meta: '400MB', dtype: 'q4' },
-    better: { id: 'HuggingFaceTB/SmolLM2-1.7B-Instruct', label: 'Better', meta: '1.1GB, higher quality', dtype: 'q4f16' },
+    gemma1b: {
+      id: 'onnx-community/gemma-3-1b-it-ONNX', label: 'Gemma 1B',
+      meta: '~860MB · Google, general-purpose',
+      dtype: 'q4',
+    },
     // A model actually fine-tuned for grammar correction (T5-small trained
     // on an expanded JFLEG dataset), not a general chat model being
     // prompted to proofread. It only knows how to do one thing — take text
     // in, return corrected text out — so it has no notion of the other
     // tones below; selecting it forces (and locks) the tone to Deep Fix.
-    // In exchange it's a fraction of the size of either model above.
+    // In exchange it's a fraction of the size of the model above.
     // Relative-position T5 can technically run past its training length,
     // but quality drops off, so it also gets a tighter input cap below.
     grammar: {
@@ -5055,6 +5058,7 @@ ${fromBody}`;
       cdnFolder: 'grammar',
     },
   };
+  const DEFAULT_MODEL = 'gemma1b';
 
   const TONES = [
     { id: 'deepfix', label: 'Deep Fix', instruction: 'Carefully proofread the text and fix every grammar, spelling, punctuation, capitalization, and word-choice error you can find, using the full context of the passage to catch mistakes a simple rule-based spellchecker would miss (wrong word for the context, subtle subject-verb agreement, tense consistency across sentences, and so on). This is a correction pass, not a rewrite: keep the original wording, sentence structure, and meaning as close to the source as possible, and only change what is actually wrong.' },
@@ -5083,30 +5087,38 @@ ${fromBody}`;
   const aiProgressFill = $('#aiProgressFill');
   const aiProgressLabel = $('#aiProgressLabel');
 
-  // Remembers, for this browser tab only, that Better failed to load once
-  // and we should go straight to Fast on future page loads without
-  // retrying it. (Belt-and-suspenders: the in-memory state.betterUnavailable
-  // flag below is what actually drives this session's behavior; this just
-  // carries the same decision across a manual page refresh.)
-  const SKIP_BETTER_KEY = 'emend-ai-skip-better';
-  let skipBetter = false;
-  try { skipBetter = sessionStorage.getItem(SKIP_BETTER_KEY) === '1'; } catch { /* storage unavailable; ignore */ }
+  // Remembers, for this browser tab only, which models have already been
+  // confirmed to fail on this device, so we don't retry them on future page
+  // loads within the same tab. (Belt-and-suspenders: the in-memory
+  // state.unavailable map below is what actually drives this session's
+  // behavior; this just carries the same decision across a manual refresh.)
+  const SKIP_KEY_PREFIX = 'emend-ai-skip-';
 
   const state = {
-    modelKey: skipBetter ? 'fast' : 'better',
+    modelKey: DEFAULT_MODEL,
     tone: 'deepfix',
+    unavailable: {},       // modelKey -> true once confirmed to fail on this device
     pipelinesReady: {},    // modelKey -> true once loaded in the current worker
     loadPromises: {},      // modelKey -> in-flight load promise, so concurrent callers share one download
     loading: null,         // modelKey currently downloading, or null
     loadingPct: null,
     loadStartedAt: null,   // Date.now() when the current download began, for ETA math
-    loadError: null,       // modelKey that most recently failed to load (and isn't the better->fast handoff)
+    loadError: null,       // modelKey that most recently failed to load (and isn't an automatic fallback)
     checking: false,
     checkStartedAt: null,  // Date.now() when the current generation began, for ETA math
     genTokens: 0,
     genMaxTokens: 0,
-    betterUnavailable: skipBetter, // set once Better is confirmed to fail on this device
   };
+
+  try {
+    Object.keys(MODELS).forEach((k) => {
+      if (sessionStorage.getItem(SKIP_KEY_PREFIX + k) === '1') state.unavailable[k] = true;
+    });
+    if (state.unavailable[state.modelKey]) {
+      const firstOk = Object.keys(MODELS).find((k) => !state.unavailable[k]);
+      if (firstOk) state.modelKey = firstOk;
+    }
+  } catch { /* storage unavailable; ignore */ }
 
   /* --------------------------- Worker plumbing --------------------------- */
   // Everything transformers.js-related (model download, session creation,
@@ -5370,41 +5382,41 @@ ${fromBody}`;
   function settleLoad(key, errMessage) {
     const resolver = loadResolvers[key];
     delete loadResolvers[key];
-    if (errMessage && key === 'better' && !state.betterUnavailable) {
-      // The higher-quality model can fail outright on some devices — its
-      // real memory footprint is just bigger than what's available there.
-      // A failed allocation leaves onnxruntime-web's WASM memory maxed out
-      // (WebAssembly.Memory can grow but never shrink), so retrying Fast in
-      // that SAME worker would fail identically even though Fast loads fine
-      // on its own. Ditch the poisoned worker for a fresh one instead of
-      // reloading the whole page — no lost editor text, no jarring reload.
-      console.warn('Better model failed to load; switching to Fast in a fresh worker:', errMessage);
-      state.betterUnavailable = true;
-      try { sessionStorage.setItem(SKIP_BETTER_KEY, '1'); } catch { /* storage unavailable; ignore */ }
+    if (errMessage) {
+      // A model can fail outright on a device whose real memory is smaller
+      // than the model needs. A failed allocation leaves onnxruntime-web's
+      // WASM memory maxed out (WebAssembly.Memory can grow but never
+      // shrink), so retrying anything else in that SAME worker would fail
+      // identically even though it loads fine on its own. Ditch the
+      // poisoned worker for a fresh one instead of reloading the whole page
+      // — no lost editor text, no jarring reload.
+      console.warn(`Model "${key}" failed to load; marking unavailable:`, errMessage);
+      state.unavailable[key] = true;
+      try { sessionStorage.setItem(SKIP_KEY_PREFIX + key, '1'); } catch { /* storage unavailable; ignore */ }
       worker.terminate();
       worker = makeWorker();
       state.pipelinesReady = {};
-      state.modelKey = 'fast';
-      // renderModelOptions() marks Better "Unavailable on this device" from
-      // here on — that's the durable explanation. A one-off flashCheckBtn()
-      // notice isn't used here: whatever caller is awaiting this (the
-      // background preload, or doCheck() itself) immediately drives the
-      // button into "Loading AI…"/"Checking…" right after, so a flashed
-      // message would just get overwritten within a few hundred ms anyway.
       renderModelOptions();
-      ensureModel('fast').then(
-        () => { if (resolver) resolver.resolve(); },
-        (err) => { if (resolver) resolver.reject(err); },
-      );
-      return;
-    }
-    if (errMessage) {
+      if (state.modelKey === key) {
+        const fallback = Object.keys(MODELS).find((k) => !state.unavailable[k]);
+        if (fallback) {
+          state.modelKey = fallback;
+          if (MODELS[fallback].task === 'text2text-generation') state.tone = 'deepfix';
+          renderModelOptions();
+          renderTones();
+          ensureModel(fallback).then(
+            () => { if (resolver) resolver.resolve(); },
+            (err) => { if (resolver) resolver.reject(err); },
+          );
+          return;
+        }
+      }
       state.loadError = key;
       updateCheckBtn();
       if (resolver) resolver.reject(new Error(errMessage));
-    } else if (resolver) {
-      resolver.resolve();
+      return;
     }
+    if (resolver) resolver.resolve();
   }
 
   function ensureModel(key) {
@@ -5442,7 +5454,7 @@ ${fromBody}`;
   function renderModelOptions() {
     modelList.innerHTML = '';
     Object.entries(MODELS).forEach(([key, m]) => {
-      const unavailable = key === 'better' && state.betterUnavailable;
+      const unavailable = !!state.unavailable[key];
       const div = document.createElement('div');
       div.className = 'model-option'
         + (state.modelKey === key ? ' selected' : '')
@@ -5468,7 +5480,7 @@ ${fromBody}`;
         btn.disabled = true;
         btn.style.opacity = '0.4';
         btn.style.cursor = 'not-allowed';
-        btn.title = 'The Grammar model only supports Deep Fix — pick Fast or Better for other tones.';
+        btn.title = 'The Grammar model only supports Deep Fix — pick Gemma 1B for other tones.';
       } else {
         btn.addEventListener('click', () => { state.tone = t.id; renderTones(); });
       }
@@ -5477,8 +5489,8 @@ ${fromBody}`;
   }
 
   function selectModel(key) {
-    if (key === 'better' && state.betterUnavailable) {
-      flashCheckBtn("Better isn't supported on this device — staying on Fast.");
+    if (state.unavailable[key]) {
+      flashCheckBtn(`${MODELS[key].label} isn't supported on this device.`);
       return;
     }
     state.modelKey = key;
@@ -5595,7 +5607,7 @@ ${fromBody}`;
     if (!source.trim()) return;
     const maxLen = MODELS[state.modelKey].maxCheckLength || MAX_CHECK_LENGTH;
     if (source.length > maxLen) {
-      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model — try Fast/Better' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
+      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model — try Gemma 1B' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
       return;
     }
     try {
@@ -5636,8 +5648,9 @@ ${fromBody}`;
       // Deep Fix is a correction pass, not creative writing: use low-temperature,
       // near-greedy decoding so it doesn't introduce new wording on top of the
       // actual errors. The stylistic tones keep some sampling for natural variety.
-      // state.modelKey may have changed since we started (a failed Better load
-      // switches to Fast above), so re-read it now rather than use a stale copy.
+      // state.modelKey may have changed since we started (a failed load
+      // switches to the other available model above), so re-read it now
+      // rather than use a stale copy.
       const modelKeyAtStart = state.modelKey;
       const text = await runGenerate(modelKeyAtStart, genInput, genOpts, () => {
         state.genTokens += 1;
