@@ -5027,9 +5027,33 @@ ${fromBody}`;
 
   const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
 
+  // Mirror of a model's weights, pre-split into <20MB chunks and hosted in
+  // our own GitHub repo so jsDelivr can serve them — a fallback path for
+  // anyone who can't reach huggingface.co directly. Only a MODELS entry
+  // that sets `cdnFolder` uses it; everything else loads from HF exactly as
+  // before. Neither model below is mirrored there yet (no emend-models repo
+  // exists), so this is currently inert plumbing — the same mechanism
+  // Palaver's palaver-models repo uses, ready to switch on the moment a
+  // matching folder (with its onnx/*.manifest.json chunk list) is published.
+  const CDN_REPO = 'https://cdn.jsdelivr.net/gh/Sm0keSkreen/emend-models@main/';
+
   const MODELS = {
     fast: { id: 'onnx-community/Qwen2.5-0.5B-Instruct', label: 'Fast', meta: '400MB', dtype: 'q4' },
     better: { id: 'HuggingFaceTB/SmolLM2-1.7B-Instruct', label: 'Better', meta: '1.1GB, higher quality', dtype: 'q4f16' },
+    // A model actually fine-tuned for grammar correction (T5-small trained
+    // on an expanded JFLEG dataset), not a general chat model being
+    // prompted to proofread. It only knows how to do one thing — take text
+    // in, return corrected text out — so it has no notion of the other
+    // tones below; selecting it forces (and locks) the tone to Deep Fix.
+    // In exchange it's a fraction of the size of either model above.
+    // Relative-position T5 can technically run past its training length,
+    // but quality drops off, so it also gets a tighter input cap below.
+    grammar: {
+      id: 'Xenova/grammar-synthesis-small', label: 'Grammar',
+      meta: '~95MB, dedicated grammar model — Deep Fix only',
+      dtype: 'q8', task: 'text2text-generation', maxCheckLength: 2000,
+      cdnFolder: 'grammar',
+    },
   };
 
   const TONES = [
@@ -5043,6 +5067,14 @@ ${fromBody}`;
   ];
 
   const MAX_CHECK_LENGTH = 20000;
+  // How long a loaded model sits idle (no check running, no new load) before
+  // its worker is discarded to free WASM/GPU memory. 0 means "unload as soon
+  // as it's not being used" — the check still runs via setTimeout so it
+  // fires right after the current call stack clears (letting the UI update
+  // first), not literally mid-function. The browser cache keeps the weights,
+  // so the next Check just reloads into a fresh worker quickly — it's not a
+  // re-download, same as the existing load-failure recovery path.
+  const IDLE_UNLOAD_MS = 0;
 
   const $ = (s) => document.querySelector(s);
   const modelList = $('#aiModelList');
@@ -5084,6 +5116,10 @@ ${fromBody}`;
     let transformersMod = null;
     const pipelines = {};
     let devicePromise = null;
+    let jsDelivrCache = null;
+
+    const HF_REMOTE_HOST = 'https://huggingface.co/';
+    const HF_REMOTE_PATH_TEMPLATE = '{model}/resolve/{revision}/';
 
     async function pickDevice() {
       if (!('gpu' in self.navigator)) return 'wasm';
@@ -5095,7 +5131,97 @@ ${fromBody}`;
       }
     }
 
-    async function loadPipeline(modelId, dtype, device, onProgress) {
+    // Model weight URLs always look like ".../onnx/<name>.onnx" or
+    // ".../onnx/<name>.onnx_data[_N]" — the only files that are ever split
+    // into chunks in the CDN mirror. Everything else (tokenizer.json,
+    // config.json, etc.) is a normal single small file.
+    function looksLikeModelWeightFile(url) {
+      return /\\/onnx\\/[^/]+\\.onnx(_data(_\\d+)?)?$/.test(url);
+    }
+
+    async function sha256Hex(buf) {
+      const digest = await crypto.subtle.digest('SHA-256', buf);
+      return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // A Cache-API-shaped object (match/put) that transformers.js will use in
+    // place of its own browser cache when loading from the CDN mirror. For
+    // ordinary small files it's a thin pass-through to a real Cache Storage
+    // bucket. For a chunked weight file (recognized by a sibling
+    // "<file>.manifest.json"), it lazily fetches each chunk, verifies its
+    // SHA-256 against the manifest, and streams the bytes back so
+    // transformers.js's own download-progress UI keeps working — then
+    // stashes the fully-assembled file in the real cache in the background
+    // so the next load of the same model is instant.
+    function getJsDelivrCache() {
+      if (jsDelivrCache) return jsDelivrCache;
+      const realCachePromise = ('caches' in self)
+        ? self.caches.open('emend-jsdelivr-v1').catch(() => null)
+        : Promise.resolve(null);
+      jsDelivrCache = {
+        async match(key) {
+          const realCache = await realCachePromise;
+          if (realCache) {
+            try {
+              const hit = await realCache.match(key);
+              if (hit) return hit;
+            } catch { /* ignore cache read errors */ }
+          }
+          if (!looksLikeModelWeightFile(key)) return undefined;
+          let manifest;
+          try {
+            const mRes = await fetch(key + '.manifest.json');
+            if (!mRes.ok) return undefined; // not a chunked file — fall through to a normal fetch
+            manifest = await mRes.json();
+          } catch {
+            return undefined;
+          }
+          const baseUrl = key.slice(0, key.lastIndexOf('/') + 1);
+          const collected = [];
+          let idx = 0;
+          const stream = new ReadableStream({
+            async pull(controller) {
+              if (idx >= manifest.parts.length) {
+                controller.close();
+                realCachePromise.then(async (cacheToStore) => {
+                  if (!cacheToStore) return;
+                  try {
+                    const fullBlob = new Blob(collected);
+                    await cacheToStore.put(key, new Response(fullBlob, {
+                      headers: { 'content-length': String(manifest.totalSize), 'content-type': 'application/octet-stream' },
+                    }));
+                  } catch { /* best-effort caching only */ }
+                });
+                return;
+              }
+              const part = manifest.parts[idx++];
+              try {
+                const res = await fetch(baseUrl + part.name);
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const buf = new Uint8Array(await res.arrayBuffer());
+                const hash = await sha256Hex(buf.buffer);
+                if (hash !== part.sha256) throw new Error('checksum mismatch for ' + part.name);
+                collected.push(buf);
+                controller.enqueue(buf);
+              } catch (err) {
+                controller.error(new Error('CDN chunk fetch failed (' + part.name + '): ' + err.message));
+              }
+            },
+          });
+          return new Response(stream, {
+            headers: { 'content-length': String(manifest.totalSize), 'content-type': 'application/octet-stream' },
+          });
+        },
+        async put(key, response) {
+          const realCache = await realCachePromise;
+          if (!realCache) return;
+          try { await realCache.put(key, response); } catch { /* best-effort caching only */ }
+        },
+      };
+      return jsDelivrCache;
+    }
+
+    async function loadPipeline(modelId, dtype, device, cdnFolder, task, onProgress) {
       if (!transformersMod) {
         transformersMod = await import(${JSON.stringify(TRANSFORMERS_CDN)});
         // See the matching comment in the old main-thread version of this
@@ -5105,7 +5231,20 @@ ${fromBody}`;
         // allocation on machines with plenty of free RAM.
         transformersMod.env.backends.onnx.wasm.numThreads = 1;
       }
-      return transformersMod.pipeline('text-generation', modelId, {
+      let pipelineModelId = modelId;
+      if (cdnFolder) {
+        transformersMod.env.remoteHost = ${JSON.stringify(CDN_REPO)};
+        transformersMod.env.remotePathTemplate = '{model}/';
+        transformersMod.env.useCustomCache = true;
+        transformersMod.env.customCache = getJsDelivrCache();
+        pipelineModelId = cdnFolder;
+      } else {
+        transformersMod.env.remoteHost = HF_REMOTE_HOST;
+        transformersMod.env.remotePathTemplate = HF_REMOTE_PATH_TEMPLATE;
+        transformersMod.env.useCustomCache = false;
+        transformersMod.env.customCache = null;
+      }
+      return transformersMod.pipeline(task || 'text-generation', pipelineModelId, {
         dtype, device, progress_callback: onProgress,
       });
     }
@@ -5113,7 +5252,7 @@ ${fromBody}`;
     self.onmessage = async (e) => {
       const msg = e.data;
       if (msg.type === 'loadModel') {
-        const { key, modelId, dtype } = msg;
+        const { key, modelId, dtype, cdnFolder, task } = msg;
         try {
           if (!devicePromise) devicePromise = pickDevice();
           let device = await devicePromise;
@@ -5128,11 +5267,11 @@ ${fromBody}`;
           };
           let generator;
           try {
-            generator = await loadPipeline(modelId, dtype, device, onProgress);
+            generator = await loadPipeline(modelId, dtype, device, cdnFolder, task, onProgress);
           } catch (err) {
             if (device !== 'wasm') {
               device = 'wasm';
-              generator = await loadPipeline(modelId, dtype, 'wasm', onProgress);
+              generator = await loadPipeline(modelId, dtype, 'wasm', cdnFolder, task, onProgress);
             } else {
               throw err;
             }
@@ -5169,7 +5308,32 @@ ${fromBody}`;
   let workerReqSeq = 0;
   const pendingGen = new Map(); // reqId -> { resolve, reject, onProgress }
 
+  let idleUnloadTimer = null;
+  function cancelIdleUnloadTimer() {
+    if (idleUnloadTimer) { clearTimeout(idleUnloadTimer); idleUnloadTimer = null; }
+  }
+  function resetIdleUnloadTimer() {
+    cancelIdleUnloadTimer();
+    idleUnloadTimer = setTimeout(unloadIdleModel, IDLE_UNLOAD_MS);
+  }
+  function unloadIdleModel() {
+    idleUnloadTimer = null;
+    // Never discard a worker that's mid-load or mid-check — just push the
+    // check out and try again once whatever's running settles.
+    if (state.checking || state.loading) { resetIdleUnloadTimer(); return; }
+    const resident = Object.keys(state.pipelinesReady).find((k) => state.pipelinesReady[k]);
+    if (!resident) return; // nothing loaded, nothing to free
+    worker.terminate();
+    worker = makeWorker();
+    state.pipelinesReady = {};
+    renderModelOptions();
+    updateCheckBtn();
+  }
+
   function makeWorker() {
+    // Every replacement worker starts with a clean slate, so any pending
+    // idle-unload check from the worker being replaced is stale.
+    cancelIdleUnloadTimer();
     const blob = new Blob([WORKER_SRC], { type: 'text/javascript' });
     const url = URL.createObjectURL(blob);
     const w = new Worker(url, { type: 'module' });
@@ -5186,6 +5350,7 @@ ${fromBody}`;
       if (state.loading === msg.key) { state.loadingPct = msg.pct; updateCheckBtn(); }
     } else if (msg.type === 'loadDone') {
       state.pipelinesReady[msg.key] = true;
+      resetIdleUnloadTimer();
       settleLoad(msg.key, null);
     } else if (msg.type === 'loadError') {
       settleLoad(msg.key, msg.message);
@@ -5218,6 +5383,7 @@ ${fromBody}`;
       try { sessionStorage.setItem(SKIP_BETTER_KEY, '1'); } catch { /* storage unavailable; ignore */ }
       worker.terminate();
       worker = makeWorker();
+      state.pipelinesReady = {};
       state.modelKey = 'fast';
       // renderModelOptions() marks Better "Unavailable on this device" from
       // here on — that's the durable explanation. A one-off flashCheckBtn()
@@ -5251,7 +5417,7 @@ ${fromBody}`;
     state.loadError = null;
     updateCheckBtn();
     const promise = new Promise((resolve, reject) => { loadResolvers[key] = { resolve, reject }; });
-    worker.postMessage({ type: 'loadModel', key, modelId: m.id, dtype: m.dtype });
+    worker.postMessage({ type: 'loadModel', key, modelId: m.id, dtype: m.dtype, cdnFolder: m.cdnFolder || null, task: m.task || 'text-generation' });
     const tracked = promise.finally(() => {
       if (state.loading === key) state.loading = null;
       delete state.loadPromises[key];
@@ -5289,11 +5455,23 @@ ${fromBody}`;
 
   function renderTones() {
     toneRow.innerHTML = '';
+    // The Grammar model is fine-tuned for grammar correction only — it has
+    // no notion of "rewrite this more formally," so every tone but Deep Fix
+    // is locked out while it's selected rather than silently ignored.
+    const grammarOnly = MODELS[state.modelKey] && MODELS[state.modelKey].task === 'text2text-generation';
     TONES.forEach((t) => {
       const btn = document.createElement('button');
+      const locked = grammarOnly && t.id !== 'deepfix';
       btn.className = 'chip' + (state.tone === t.id ? ' active' : '');
       btn.textContent = t.label;
-      btn.addEventListener('click', () => { state.tone = t.id; renderTones(); });
+      if (locked) {
+        btn.disabled = true;
+        btn.style.opacity = '0.4';
+        btn.style.cursor = 'not-allowed';
+        btn.title = 'The Grammar model only supports Deep Fix — pick Fast or Better for other tones.';
+      } else {
+        btn.addEventListener('click', () => { state.tone = t.id; renderTones(); });
+      }
       toneRow.appendChild(btn);
     });
   }
@@ -5304,7 +5482,9 @@ ${fromBody}`;
       return;
     }
     state.modelKey = key;
+    if (MODELS[key].task === 'text2text-generation') state.tone = 'deepfix';
     renderModelOptions();
+    renderTones();
     updateCheckBtn();
     if (!state.pipelinesReady[key] && state.loading !== key) ensureModel(key).catch(() => {});
   }
@@ -5413,8 +5593,9 @@ ${fromBody}`;
     const baseOffset = hasSel ? editor.selectionStart : 0;
     const source = hasSel ? editor.value.slice(editor.selectionStart, editor.selectionEnd) : editor.value;
     if (!source.trim()) return;
-    if (source.length > MAX_CHECK_LENGTH) {
-      flashCheckBtn('Text too long', 1600);
+    const maxLen = MODELS[state.modelKey].maxCheckLength || MAX_CHECK_LENGTH;
+    if (source.length > maxLen) {
+      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model — try Fast/Better' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
       return;
     }
     try {
@@ -5441,16 +5622,24 @@ ${fromBody}`;
     state.checkStartedAt = Date.now();
     updateCheckBtn();
     try {
-      const messages = [
-        { role: 'system', content: 'Reply with only the corrected/rewritten text. No preamble, no quotes, no explanation of what changed.' },
-        { role: 'user', content: `${tone.instruction}\n\nTEXT:\n${source}` },
-      ];
+      // The Grammar model is a plain text2text corrector, not an instruction
+      // follower — it takes the raw source text in and returns corrected
+      // text out, with no system/tone prompt wrapping it (there's nothing
+      // for it to "follow"; feeding it a prompt would just become text it
+      // tries to also "correct").
+      const genInput = MODELS[state.modelKey].task === 'text2text-generation'
+        ? source
+        : [
+          { role: 'system', content: 'Reply with only the corrected/rewritten text. No preamble, no quotes, no explanation of what changed.' },
+          { role: 'user', content: `${tone.instruction}\n\nTEXT:\n${source}` },
+        ];
       // Deep Fix is a correction pass, not creative writing: use low-temperature,
       // near-greedy decoding so it doesn't introduce new wording on top of the
       // actual errors. The stylistic tones keep some sampling for natural variety.
       // state.modelKey may have changed since we started (a failed Better load
       // switches to Fast above), so re-read it now rather than use a stale copy.
-      const text = await runGenerate(state.modelKey, messages, genOpts, () => {
+      const modelKeyAtStart = state.modelKey;
+      const text = await runGenerate(modelKeyAtStart, genInput, genOpts, () => {
         state.genTokens += 1;
         updateCheckBtn();
       });
@@ -5460,6 +5649,11 @@ ${fromBody}`;
       console.error(err);
     } finally {
       state.checking = false;
+      // The check just used the model; the idle clock starts fresh from
+      // here. (state.modelKey is read again rather than reusing a captured
+      // value, since ensureModel() above may run again before this settles;
+      // either way, only rearm the timer if something is actually resident.)
+      if (Object.keys(state.pipelinesReady).some((k) => state.pipelinesReady[k])) resetIdleUnloadTimer();
       updateCheckBtn();
     }
   }
