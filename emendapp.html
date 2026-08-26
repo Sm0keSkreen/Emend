@@ -4400,7 +4400,7 @@ ${fromBody}`;
   /* ------------------------- AI correction diffing ----------------------
      The AI Check button asks the local model to produce a corrected version
      of the whole text, then we diff that against the original word-by-word
-     and turn each changed span into a lint-shaped object — so AI-sourced
+     and turn each changed span into a lint-shaped object , so AI-sourced
      fixes render as the exact same accept/dismiss cards as Harper's own
      issues, rather than a separate "here's your rewritten text" box. */
 
@@ -4563,7 +4563,7 @@ ${fromBody}`;
 
   function filteredLints() {
     // Correctness (spelling, grammar, basic flow) is always caught no matter
-    // which tab is active — the mode tabs only add on top of that baseline,
+    // which tab is active , the mode tabs only add on top of that baseline,
     // rather than hiding correctness issues when a style tab is selected.
     // AI-sourced fixes are always shown too, regardless of tab.
     if (state.mode === 'all') return state.lints;
@@ -4599,7 +4599,7 @@ ${fromBody}`;
     const lints = filteredLints();
     if (lints.length === 0) {
       // Harper re-checks automatically as you type, but the AI Check is
-      // manual — so an empty list only means "no issues" once the AI has
+      // manual , so an empty list only means "no issues" once the AI has
       // actually looked at THIS text. Until then, invite another check
       // rather than claiming a clean bill of health we haven't earned.
       const msg = state.aiChecked ? 'No issues found' : 'Ready to check';
@@ -4671,7 +4671,7 @@ ${fromBody}`;
       after = before.slice(0, l.start) + l.suggestions[suggIdx] + before.slice(l.end);
     }
     // runLint() re-derives Harper's own lints fresh from the new text, but it
-    // has no way to re-derive the AI Check's cached results — those would
+    // has no way to re-derive the AI Check's cached results , those would
     // just vanish otherwise. Keep the OTHER pending AI cards alive by
     // shifting their offsets past this edit (dropping any that overlapped
     // the span we just changed, since their position is no longer trustworthy).
@@ -4700,7 +4700,7 @@ ${fromBody}`;
     // just "alot" while an AI suggestion covers the whole "alot of" phrase);
     // splicing both in would corrupt the text, since the second splice's
     // start/end were computed against text that the first one already
-    // changed. Once a span is committed, skip anything that overlaps it —
+    // changed. Once a span is committed, skip anything that overlaps it ,
     // the user gets the first (rightmost-processed) fix and can resolve
     // the redundant one individually if it's still relevant after re-lint.
     const lints = [...filteredLints()].filter((l) => l.suggestions.length).sort((a, b) => b.start - a.start);
@@ -4799,7 +4799,7 @@ ${fromBody}`;
   // the highlight layer just mirrors that scroll offset via transform.
 
   editor.addEventListener('input', () => {
-    // Any edit invalidates the last AI Check immediately — don't wait for
+    // Any edit invalidates the last AI Check immediately , don't wait for
     // the debounced Harper re-lint to (eventually) drop stale AI cards.
     if (state.aiChecked || state.lints.some((l) => l.kind === 'AI')) {
       state.lints = state.lints.filter((l) => l.kind !== 'AI');
@@ -4954,7 +4954,7 @@ ${fromBody}`;
       // The AI pass rewrites the whole slice from scratch, so it routinely
       // "rediscovers" fixes Harper already caught (a typo, a grammar slip)
       // on top of whatever it's actually adding. Showing both as separate
-      // cards for the same span is just clutter, not extra value — so skip
+      // cards for the same span is just clutter, not extra value , so skip
       // an AI hunk when an existing (non-AI) lint already covers that span
       // with the exact same replacement text.
       const harperLints = state.lints;
@@ -5010,7 +5010,7 @@ ${fromBody}`;
 /* AI Check: an optional local-model pass that looks for the same kind of
    errors a rule-based checker misses (wrong word for context, subtler
    agreement/tense issues) plus a few stylistic modes, and reports them the
-   same way Harper's own checks do — as accept/dismiss cards in the
+   same way Harper's own checks do , as accept/dismiss cards in the
    suggestions list. The model downloads automatically in the background as
    soon as the page loads (no extra step to opt in), and everything runs
    on-device; nothing leaves the browser.
@@ -5028,11 +5028,11 @@ ${fromBody}`;
   const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
 
   // Mirror of a model's weights, pre-split into <20MB chunks and hosted in
-  // our own GitHub repo so jsDelivr can serve them — a fallback path for
+  // our own GitHub repo so jsDelivr can serve them , a fallback path for
   // anyone who can't reach huggingface.co directly. Only a MODELS entry
   // that sets `cdnFolder` uses it; everything else loads from HF exactly as
   // before. Neither model below is mirrored there yet (no emend-models repo
-  // exists), so this is currently inert plumbing — the same mechanism
+  // exists), so this is currently inert plumbing , the same mechanism
   // Palaver's palaver-models repo uses, ready to switch on the moment a
   // matching folder (with its onnx/*.manifest.json chunk list) is published.
   const CDN_REPO = 'https://cdn.jsdelivr.net/gh/Sm0keSkreen/emend-models@main/';
@@ -5045,15 +5045,15 @@ ${fromBody}`;
     },
     // A model actually fine-tuned for grammar correction (T5-small trained
     // on an expanded JFLEG dataset), not a general chat model being
-    // prompted to proofread. It only knows how to do one thing — take text
-    // in, return corrected text out — so it has no notion of the other
+    // prompted to proofread. It only knows how to do one thing , take text
+    // in, return corrected text out , so it has no notion of the other
     // tones below; selecting it forces (and locks) the tone to Deep Fix.
     // In exchange it's a fraction of the size of the model above.
     // Relative-position T5 can technically run past its training length,
     // but quality drops off, so it also gets a tighter input cap below.
     grammar: {
       id: 'Xenova/grammar-synthesis-small', label: 'Grammar',
-      meta: '~95MB, dedicated grammar model — Deep Fix only',
+      meta: '~95MB, dedicated grammar model , Deep Fix only',
       dtype: 'q8', task: 'text2text-generation', maxCheckLength: 2000,
       cdnFolder: 'grammar',
     },
@@ -5073,10 +5073,10 @@ ${fromBody}`;
   const MAX_CHECK_LENGTH = 20000;
   // How long a loaded model sits idle (no check running, no new load) before
   // its worker is discarded to free WASM/GPU memory. 0 means "unload as soon
-  // as it's not being used" — the check still runs via setTimeout so it
+  // as it's not being used" , the check still runs via setTimeout so it
   // fires right after the current call stack clears (letting the UI update
   // first), not literally mid-function. The browser cache keeps the weights,
-  // so the next Check just reloads into a fresh worker quickly — it's not a
+  // so the next Check just reloads into a fresh worker quickly , it's not a
   // re-download, same as the existing load-failure recovery path.
   const IDLE_UNLOAD_MS = 0;
 
@@ -5144,7 +5144,7 @@ ${fromBody}`;
     }
 
     // Model weight URLs always look like ".../onnx/<name>.onnx" or
-    // ".../onnx/<name>.onnx_data[_N]" — the only files that are ever split
+    // ".../onnx/<name>.onnx_data[_N]" , the only files that are ever split
     // into chunks in the CDN mirror. Everything else (tokenizer.json,
     // config.json, etc.) is a normal single small file.
     function looksLikeModelWeightFile(url) {
@@ -5162,7 +5162,7 @@ ${fromBody}`;
     // bucket. For a chunked weight file (recognized by a sibling
     // "<file>.manifest.json"), it lazily fetches each chunk, verifies its
     // SHA-256 against the manifest, and streams the bytes back so
-    // transformers.js's own download-progress UI keeps working — then
+    // transformers.js's own download-progress UI keeps working , then
     // stashes the fully-assembled file in the real cache in the background
     // so the next load of the same model is instant.
     function getJsDelivrCache() {
@@ -5183,7 +5183,7 @@ ${fromBody}`;
           let manifest;
           try {
             const mRes = await fetch(key + '.manifest.json');
-            if (!mRes.ok) return undefined; // not a chunked file — fall through to a normal fetch
+            if (!mRes.ok) return undefined; // not a chunked file , fall through to a normal fetch
             manifest = await mRes.json();
           } catch {
             return undefined;
@@ -5330,7 +5330,7 @@ ${fromBody}`;
   }
   function unloadIdleModel() {
     idleUnloadTimer = null;
-    // Never discard a worker that's mid-load or mid-check — just push the
+    // Never discard a worker that's mid-load or mid-check , just push the
     // check out and try again once whatever's running settles.
     if (state.checking || state.loading) { resetIdleUnloadTimer(); return; }
     const resident = Object.keys(state.pipelinesReady).find((k) => state.pipelinesReady[k]);
@@ -5389,7 +5389,7 @@ ${fromBody}`;
       // shrink), so retrying anything else in that SAME worker would fail
       // identically even though it loads fine on its own. Ditch the
       // poisoned worker for a fresh one instead of reloading the whole page
-      // — no lost editor text, no jarring reload.
+      // , no lost editor text, no jarring reload.
       console.warn(`Model "${key}" failed to load; marking unavailable:`, errMessage);
       state.unavailable[key] = true;
       try { sessionStorage.setItem(SKIP_KEY_PREFIX + key, '1'); } catch { /* storage unavailable; ignore */ }
@@ -5467,7 +5467,7 @@ ${fromBody}`;
 
   function renderTones() {
     toneRow.innerHTML = '';
-    // The Grammar model is fine-tuned for grammar correction only — it has
+    // The Grammar model is fine-tuned for grammar correction only , it has
     // no notion of "rewrite this more formally," so every tone but Deep Fix
     // is locked out while it's selected rather than silently ignored.
     const grammarOnly = MODELS[state.modelKey] && MODELS[state.modelKey].task === 'text2text-generation';
@@ -5480,7 +5480,7 @@ ${fromBody}`;
         btn.disabled = true;
         btn.style.opacity = '0.4';
         btn.style.cursor = 'not-allowed';
-        btn.title = 'The Grammar model only supports Deep Fix — pick Gemma 1B for other tones.';
+        btn.title = 'The Grammar model only supports Deep Fix , pick Gemma 1B for other tones.';
       } else {
         btn.addEventListener('click', () => { state.tone = t.id; renderTones(); });
       }
@@ -5502,7 +5502,7 @@ ${fromBody}`;
   }
 
   // Briefly shows a message in place of the Check button's normal label,
-  // then reverts — used for one-off notices (a model switch, a length
+  // then reverts , used for one-off notices (a model switch, a length
   // guard) without needing a separate toast/notification UI.
   function flashCheckBtn(message, ms = 2200) {
     setProgressFill(0);
@@ -5515,7 +5515,7 @@ ${fromBody}`;
     aiProgressFill.style.width = (pct == null ? 0 : Math.max(0, Math.min(100, pct))) + '%';
   }
 
-  // Rough proxy for how many tokens the reply will actually run — used only
+  // Rough proxy for how many tokens the reply will actually run , used only
   // to size the progress bar's denominator, never sent to the model (the
   // real max_new_tokens cap still governs generation). ~4 characters per
   // token is a common enough English rule of thumb; Deep Fix and the other
@@ -5607,7 +5607,7 @@ ${fromBody}`;
     if (!source.trim()) return;
     const maxLen = MODELS[state.modelKey].maxCheckLength || MAX_CHECK_LENGTH;
     if (source.length > maxLen) {
-      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model — try Gemma 1B' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
+      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model , try Gemma 1B' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
       return;
     }
     try {
@@ -5622,20 +5622,20 @@ ${fromBody}`;
       : { max_new_tokens: 512, temperature: 0.7, do_sample: true };
     state.checking = true;
     state.genTokens = 0;
-    // The hard cap (max_new_tokens) is a ceiling the model rarely reaches —
+    // The hard cap (max_new_tokens) is a ceiling the model rarely reaches ,
     // Deep Fix and most tones stop at an EOS token once the corrected/rewritten
     // text is done, usually close to the input's own length. Sizing the
     // progress bar's denominator off the 512-token cap instead of that
     // realistic length makes the bar (and its ETA) crawl at ~1% for the
     // entire check, then jump straight to done. Estimate the likely output
-    // length instead so "N% done" — and the ETA derived from it — tracks
+    // length instead so "N% done" , and the ETA derived from it , tracks
     // where generation actually is.
     state.genMaxTokens = estimateOutputTokens(source, tone.id, genOpts.max_new_tokens);
     state.checkStartedAt = Date.now();
     updateCheckBtn();
     try {
       // The Grammar model is a plain text2text corrector, not an instruction
-      // follower — it takes the raw source text in and returns corrected
+      // follower , it takes the raw source text in and returns corrected
       // text out, with no system/tone prompt wrapping it (there's nothing
       // for it to "follow"; feeding it a prompt would just become text it
       // tries to also "correct").
