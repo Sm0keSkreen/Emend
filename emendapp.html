@@ -185,12 +185,9 @@ select#dialect{
 .btn.ai:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
 .btn:disabled{opacity:.4;cursor:not-allowed;}
 
-/* AI progress bar: the fill lives *inside* the Check button itself (an
-   absolutely-positioned span behind the label) so the model-download and
-   generation progress reads as "the button is filling up" rather than
-   needing separate layout space. Disabled opacity is skipped while a
-   progress fill is active (ai-progress-btn.busy) so the fill stays legible;
-   the button is still non-interactive via pointer-events. */
+/* AI progress bar: fill lives inside the Check button (absolutely-positioned
+   span behind the label) so progress reads as "the button is filling up".
+   Skips disabled opacity while active (busy) so fill stays legible. */
 .ai-progress-btn{position:relative;overflow:hidden;}
 .ai-progress-btn:disabled{cursor:default;}
 .ai-progress-btn.busy:disabled{opacity:1;pointer-events:none;}
@@ -4397,12 +4394,8 @@ ${fromBody}`;
     return form;
   }
 
-  /* ------------------------- AI correction diffing ----------------------
-     The AI Check button asks the local model to produce a corrected version
-     of the whole text, then we diff that against the original word-by-word
-     and turn each changed span into a lint-shaped object , so AI-sourced
-     fixes render as the exact same accept/dismiss cards as Harper's own
-     issues, rather than a separate "here's your rewritten text" box. */
+  /* AI correction diffing: diff model output against original and turn
+     changed spans into lint cards matching Harper's own format. */
 
   function tokenize(text) {
     // Words and the whitespace/punctuation between them, every character
@@ -4430,9 +4423,8 @@ ${fromBody}`;
     return ops;
   }
 
-  /** Diff two versions of the same text and return {start,end,oldText,newText}
-   *  hunks positioned by character offset into `oldText`. Returns null if the
-   *  text is too large for an O(n*m) diff to be worth doing. */
+  /** Diff two text versions and return {start,end,oldText,newText} hunks.
+   *  Returns null if text is too large for O(n*m). */
   function buildAiHunks(oldText, newText) {
     const a = tokenize(oldText), b = tokenize(newText);
     if (a.length * b.length > 4_000_000) return null;
@@ -4455,8 +4447,7 @@ ${fromBody}`;
 
   /* ---------------------------- Engines -------------------------------- */
 
-  /** Wraps harper.js's WorkerLinter (runs off the main thread) behind a
-   *  small plain-data interface the UI code below can consume. */
+  /** Wraps harper.js WorkerLinter behind a plain-data interface. */
   class HarperEngine {
     constructor() { this.linter = null; this.H = null; }
     async setup() {
@@ -4467,8 +4458,7 @@ ${fromBody}`;
         this.linter = new H.WorkerLinter({ binary: H.binaryInlined, dialect: H.Dialect.American });
         await this.linter.setup();
       } catch (err) {
-        // Fall back to a main-thread linter if Web Workers are unavailable
-        // in this context (e.g. certain restricted/embedded views).
+        // Fall back to main-thread linter when Workers are unavailable.
         console.warn('WorkerLinter unavailable, falling back to LocalLinter:', err);
         this.linter = new H.LocalLinter({ binary: H.binaryInlined, dialect: H.Dialect.American });
         await this.linter.setup();
@@ -4490,8 +4480,7 @@ ${fromBody}`;
         let suggestions = rawSuggestions.map((s) => s.get_replacement_text());
         let rawForApply = rawSuggestions;
         if (suggestions.length === 0 && kind === 'Agreement') {
-          // No suggestion from the engine: try to work one out ourselves
-          // rather than leave the issue with nothing to act on.
+          // No engine suggestion available: generate one ourselves.
           const guess = guessBeCorrection(text, span.start, problemText);
           if (guess) { suggestions = [guess]; rawForApply = [null]; }
         }
@@ -4511,7 +4500,7 @@ ${fromBody}`;
     async applySuggestion(text, item, idx) {
       const raw = item._raw.suggestions[idx];
       if (!raw) {
-        // A fallback suggestion we computed ourselves (no engine object to apply).
+        // Computed suggestion, no engine object to apply.
         return text.slice(0, item.start) + item.suggestions[idx] + text.slice(item.end);
       }
       return await this.linter.applySuggestion(text, item._raw.lint, raw);
@@ -4519,7 +4508,7 @@ ${fromBody}`;
     async toTitleCase(text) { return await this.linter.toTitleCase(text); }
   }
 
-  /* ------------------------------ DOM ----------------------------------- */
+  /* DOM */
   const $ = (sel) => document.querySelector(sel);
   const editor = $('#editor');
   const highlights = $('#highlights');
@@ -4545,7 +4534,7 @@ ${fromBody}`;
   const themeRow = $('#themeRow');
   const fontSelect = $('#fontSelect');
 
-  /* ------------------------------ State ---------------------------------- */
+  /* State */
   const state = {
     mode: 'all',           // all | correctness | clarity | engagement
     lints: [],              // full unfiltered list from engine + any AI-sourced ones
@@ -4562,10 +4551,8 @@ ${fromBody}`;
   }
 
   function filteredLints() {
-    // Correctness (spelling, grammar, basic flow) is always caught no matter
-    // which tab is active , the mode tabs only add on top of that baseline,
-    // rather than hiding correctness issues when a style tab is selected.
-    // AI-sourced fixes are always shown too, regardless of tab.
+    // Correctness is always shown; mode tabs only add style categories.
+    // AI fixes are always shown regardless of tab.
     if (state.mode === 'all') return state.lints;
     return state.lints.filter((l) => {
       const g = groupOf(l.kind);
@@ -4575,7 +4562,7 @@ ${fromBody}`;
     });
   }
 
-  /* --------------------------- Rendering --------------------------------- */
+  /* Rendering */
 
   function renderHighlights() {
     const text = editor.value;
@@ -4598,10 +4585,7 @@ ${fromBody}`;
   function renderSuggestions() {
     const lints = filteredLints();
     if (lints.length === 0) {
-      // Harper re-checks automatically as you type, but the AI Check is
-      // manual , so an empty list only means "no issues" once the AI has
-      // actually looked at THIS text. Until then, invite another check
-      // rather than claiming a clean bill of health we haven't earned.
+      // Only show "No issues found" after AI has checked; otherwise prompt.
       const msg = state.aiChecked ? 'No issues found' : 'Ready to check';
       issueCount.textContent = msg;
       emptyState.textContent = msg;
@@ -4649,8 +4633,8 @@ ${fromBody}`;
     if (l) {
       editor.focus();
       editor.setSelectionRange(l.start, l.end);
-      // native textarea scroll-into-view fires a 'scroll' event, which the
-      // listener below already uses to keep the highlight layer in sync.
+      // setSelectionRange triggers scroll-into-view, which the scroll
+      // listener below already handles for highlight sync.
     }
     renderHighlights();
     renderSuggestions();
@@ -4658,7 +4642,7 @@ ${fromBody}`;
     if (card) card.scrollIntoView({ block: 'nearest' });
   }
 
-  /* --------------------------- Text mutation ------------------------------ */
+  /* Text mutation */
 
   async function acceptLint(id, suggIdx) {
     const l = state.lints.find((x) => x.id === id);
@@ -4670,11 +4654,8 @@ ${fromBody}`;
     } catch {
       after = before.slice(0, l.start) + l.suggestions[suggIdx] + before.slice(l.end);
     }
-    // runLint() re-derives Harper's own lints fresh from the new text, but it
-    // has no way to re-derive the AI Check's cached results , those would
-    // just vanish otherwise. Keep the OTHER pending AI cards alive by
-    // shifting their offsets past this edit (dropping any that overlapped
-    // the span we just changed, since their position is no longer trustworthy).
+    // Keep surviving AI cards alive by shifting their offsets past this edit.
+    // Drop any that overlap the changed span (position no longer trustworthy).
     const delta = after.length - before.length;
     const survivingAi = state.lints
       .filter((x) => x.kind === 'AI' && x.id !== id)
@@ -4695,14 +4676,8 @@ ${fromBody}`;
   }
 
   async function acceptAll() {
-    // Apply from the end of the text backwards so earlier offsets stay valid.
-    // Two lints can legitimately overlap the same span (e.g. Harper flags
-    // just "alot" while an AI suggestion covers the whole "alot of" phrase);
-    // splicing both in would corrupt the text, since the second splice's
-    // start/end were computed against text that the first one already
-    // changed. Once a span is committed, skip anything that overlaps it ,
-    // the user gets the first (rightmost-processed) fix and can resolve
-    // the redundant one individually if it's still relevant after re-lint.
+    // Apply backwards so earlier offsets stay valid. Skip overlapping spans
+    // (the second splice's offsets would be corrupted by the first).
     const lints = [...filteredLints()].filter((l) => l.suggestions.length).sort((a, b) => b.start - a.start);
     let text = editor.value;
     let consumedFrom = Infinity;
@@ -4794,13 +4769,10 @@ ${fromBody}`;
     readabilityEl.textContent = `${label}, score ${Math.round(Math.max(0, Math.min(100, flesch)))}`;
   }
 
-  /* ------------------------------ Editor sync ------------------------------- */
-  // The editor fills its panel at a fixed height and scrolls internally;
-  // the highlight layer just mirrors that scroll offset via transform.
+  /* Editor sync: mirror textarea scroll offset onto highlight layer. */
 
   editor.addEventListener('input', () => {
-    // Any edit invalidates the last AI Check immediately , don't wait for
-    // the debounced Harper re-lint to (eventually) drop stale AI cards.
+    // Drop stale AI cards immediately on any edit.
     if (state.aiChecked || state.lints.some((l) => l.kind === 'AI')) {
       state.lints = state.lints.filter((l) => l.kind !== 'AI');
       state.aiChecked = false;
@@ -4818,7 +4790,7 @@ ${fromBody}`;
     if (mark) selectLint(Number(mark.dataset.id));
   });
 
-  /* ------------------------------ Toolbar ------------------------------------ */
+  /* Toolbar */
 
   modeTabs.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-mode]');
@@ -4831,7 +4803,7 @@ ${fromBody}`;
 
   dialectSelect.addEventListener('change', async () => {
     await engine.setDialect(dialectSelect.value);
-    state.aiChecked = false; // different rules can change what's flagged; keep AI results in sync
+    state.aiChecked = false; // dialect change may re-flag different issues
     await runLint();
   });
 
@@ -4887,7 +4859,7 @@ ${fromBody}`;
     uploadInput.value = '';
   });
 
-  /* ------------------------------ Settings ------------------------------------- */
+  /* Settings */
 
   const THEMES = [
     { id: 'midnight', label: 'Midnight', bg: '#080b11', accent: '#3e82f7' },
@@ -4929,34 +4901,22 @@ ${fromBody}`;
     settingsPanel.classList.toggle('open');
   });
   document.addEventListener('click', (e) => {
-    // Use composedPath() rather than settingsWrap.contains(e.target): a click
-    // on a theme swatch rebuilds themeRow's innerHTML synchronously (see
-    // renderThemes), which detaches the clicked button from the document
-    // before this listener runs. contains() would then see a disconnected
-    // node and wrongly treat the click as "outside", closing the panel
-    // immediately after every theme pick. composedPath() is captured at
-    // dispatch time, before any of that mutation happens.
+    // Use composedPath() instead of contains(): theme swatch clicks rebuild
+    // themeRow innerHTML synchronously, detaching the clicked button before
+    // this listener runs. contains() would see a disconnected node and
+    // wrongly close the panel.
     if (settingsPanel.classList.contains('open') && !e.composedPath().includes(settingsWrap)) {
       settingsPanel.classList.remove('open');
     }
   });
 
-  /* ------------------------------ AI Check ------------------------------------- */
-  // Called by ai.js once the model has produced a corrected version of the
-  // text. Diffs it against what was actually sent (which may be just a
-  // selection, hence baseOffset) and merges the changed spans in as lint
-  // cards indistinguishable in behavior from Harper's own.
+  /* AI Check: diffs model output against original, merges as lint cards. */
   let aiHunkSeq = 0;
   function applyAiHunks(originalSlice, correctedText, baseOffset) {
     const hunks = buildAiHunks(originalSlice, correctedText);
     state.lints = state.lints.filter((l) => l.kind !== 'AI');
     if (hunks) {
-      // The AI pass rewrites the whole slice from scratch, so it routinely
-      // "rediscovers" fixes Harper already caught (a typo, a grammar slip)
-      // on top of whatever it's actually adding. Showing both as separate
-      // cards for the same span is just clutter, not extra value , so skip
-      // an AI hunk when an existing (non-AI) lint already covers that span
-      // with the exact same replacement text.
+      // Skip AI hunks that duplicate an existing Harper lint with the same replacement.
       const harperLints = state.lints;
       for (const h of hunks) {
         const start = h.start + baseOffset;
@@ -4967,7 +4927,7 @@ ${fromBody}`;
         if (dupesHarper) continue;
         aiHunkSeq += 1;
         state.lints.push({
-          id: 1e6 + aiHunkSeq, // well clear of Harper's own small per-lint ids
+          id: 1e6 + aiHunkSeq, // separate from Harper's small per-lint ids
           start,
           end,
           problemText: h.oldText,
@@ -4985,7 +4945,7 @@ ${fromBody}`;
     renderSuggestions();
   }
 
-  /* ------------------------------ Boot ---------------------------------------- */
+  /* Boot */
 
   async function boot() {
     setStatus('loading');
@@ -5007,35 +4967,18 @@ ${fromBody}`;
 
 </script>
 <script>
-/* AI Check: an optional local-model pass that looks for the same kind of
-   errors a rule-based checker misses (wrong word for context, subtler
-   agreement/tense issues) plus a few stylistic modes, and reports them the
-   same way Harper's own checks do , as accept/dismiss cards in the
-   suggestions list. The model downloads automatically in the background as
-   soon as the page loads (no extra step to opt in), and everything runs
-   on-device; nothing leaves the browser.
-
-   Model loading and text generation both run inside a dedicated Web Worker
-   (see WORKER_SRC below) rather than on the main thread. transformers.js's
-   WASM backend does real, synchronous-feeling heavy lifting for both steps;
-   run in-page, that freezes the UI (the editor stops responding, buttons
-   don't visually update) for as long as it takes. Moving it into a worker
-   keeps the page interactive throughout, and lets the main thread show live
-   progress instead of guessing whether it's still working. */
+/* AI Check: optional local-model pass for errors a rule-based checker
+   misses (wrong word, subtler agreement/tense issues) plus stylistic
+   modes. Reports as accept/dismiss cards like Harper's own checks.
+   Model auto-downloads on page load; everything runs on-device. Runs
+   in a dedicated Web Worker to keep the page interactive. */
 (() => {
   'use strict';
 
   const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
 
-  // Mirror of a model's weights, pre-split into <20MB chunks and hosted in
-  // our own GitHub repo so jsDelivr can serve them , a fallback path for
-  // anyone who can't reach huggingface.co directly. Only a MODELS entry
-  // that sets `cdnFolder` uses it; everything else loads from HF exactly as
-  // before. Neither model below is mirrored there yet (no emend-models repo
-  // exists), so this is currently inert plumbing , the same mechanism
-  // Palaver's palaver-models repo uses, ready to switch on the moment a
-  // matching folder (with its onnx/*.manifest.json chunk list) is published.
-  const CDN_REPO = 'https://cdn.jsdelivr.net/gh/Sm0keSkreen/emend-models@main/';
+  // CDN mirror of model weights, split into <20MB chunks, served from palaver-models.
+  const CDN_REPO = 'https://cdn.jsdelivr.net/gh/Sm0keSkreen/palaver-models@main/';
 
   const MODELS = {
     gemma1b: {
@@ -5043,14 +4986,10 @@ ${fromBody}`;
       meta: '~860MB · Google, general-purpose',
       dtype: 'q4',
     },
-    // A model actually fine-tuned for grammar correction (T5-small trained
-    // on an expanded JFLEG dataset), not a general chat model being
-    // prompted to proofread. It only knows how to do one thing , take text
-    // in, return corrected text out , so it has no notion of the other
-    // tones below; selecting it forces (and locks) the tone to Deep Fix.
-    // In exchange it's a fraction of the size of the model above.
-    // Relative-position T5 can technically run past its training length,
-    // but quality drops off, so it also gets a tighter input cap below.
+    // Grammar: fine-tuned T5-small for grammar correction only. Locked to
+    // Deep Fix tone (no notion of "rewrite more formally"). Fraction of the
+    // size of Gemma. T5 can technically run past training length but quality
+    // drops, so it gets a tighter input cap.
     grammar: {
       id: 'Xenova/grammar-synthesis-small', label: 'Grammar',
       meta: '~95MB, dedicated grammar model , Deep Fix only',
@@ -5071,13 +5010,9 @@ ${fromBody}`;
   ];
 
   const MAX_CHECK_LENGTH = 20000;
-  // How long a loaded model sits idle (no check running, no new load) before
-  // its worker is discarded to free WASM/GPU memory. 0 means "unload as soon
-  // as it's not being used" , the check still runs via setTimeout so it
-  // fires right after the current call stack clears (letting the UI update
-  // first), not literally mid-function. The browser cache keeps the weights,
-  // so the next Check just reloads into a fresh worker quickly , it's not a
-  // re-download, same as the existing load-failure recovery path.
+  // Idle timeout before discarding a loaded model to free WASM/GPU memory.
+  // 0 = unload immediately after the call stack clears (check still runs).
+  // Browser cache keeps weights, so next load is a quick reload, not re-download.
   const IDLE_UNLOAD_MS = 0;
 
   const $ = (s) => document.querySelector(s);
@@ -5087,11 +5022,8 @@ ${fromBody}`;
   const aiProgressFill = $('#aiProgressFill');
   const aiProgressLabel = $('#aiProgressLabel');
 
-  // Remembers, for this browser tab only, which models have already been
-  // confirmed to fail on this device, so we don't retry them on future page
-  // loads within the same tab. (Belt-and-suspenders: the in-memory
-  // state.unavailable map below is what actually drives this session's
-  // behavior; this just carries the same decision across a manual refresh.)
+  // Per-tab sessionStorage of models confirmed to fail on this device.
+  // Belt-and-suspenders with state.unavailable (which is session-only).
   const SKIP_KEY_PREFIX = 'emend-ai-skip-';
 
   const state = {
@@ -5102,10 +5034,10 @@ ${fromBody}`;
     loadPromises: {},      // modelKey -> in-flight load promise, so concurrent callers share one download
     loading: null,         // modelKey currently downloading, or null
     loadingPct: null,
-    loadStartedAt: null,   // Date.now() when the current download began, for ETA math
-    loadError: null,       // modelKey that most recently failed to load (and isn't an automatic fallback)
+    loadStartedAt: null,   // download start time for ETA
+    loadError: null,
     checking: false,
-    checkStartedAt: null,  // Date.now() when the current generation began, for ETA math
+    checkStartedAt: null,  // generation start time for ETA
     genTokens: 0,
     genMaxTokens: 0,
   };
@@ -5120,10 +5052,7 @@ ${fromBody}`;
     }
   } catch { /* storage unavailable; ignore */ }
 
-  /* --------------------------- Worker plumbing --------------------------- */
-  // Everything transformers.js-related (model download, session creation,
-  // token generation) happens inside this worker's own thread. The main
-  // thread only ever exchanges small JSON messages with it.
+  /* Worker plumbing: model download, session, and generation all run here. */
   const WORKER_SRC = `
     let transformersMod = null;
     const pipelines = {};
@@ -5143,10 +5072,8 @@ ${fromBody}`;
       }
     }
 
-    // Model weight URLs always look like ".../onnx/<name>.onnx" or
-    // ".../onnx/<name>.onnx_data[_N]" , the only files that are ever split
-    // into chunks in the CDN mirror. Everything else (tokenizer.json,
-    // config.json, etc.) is a normal single small file.
+    // Weight URLs: ".../onnx/<name>.onnx[_data][_N]". These are the only
+    // files split into chunks in the CDN mirror.
     function looksLikeModelWeightFile(url) {
       return /\\/onnx\\/[^/]+\\.onnx(_data(_\\d+)?)?$/.test(url);
     }
@@ -5156,15 +5083,9 @@ ${fromBody}`;
       return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
     }
 
-    // A Cache-API-shaped object (match/put) that transformers.js will use in
-    // place of its own browser cache when loading from the CDN mirror. For
-    // ordinary small files it's a thin pass-through to a real Cache Storage
-    // bucket. For a chunked weight file (recognized by a sibling
-    // "<file>.manifest.json"), it lazily fetches each chunk, verifies its
-    // SHA-256 against the manifest, and streams the bytes back so
-    // transformers.js's own download-progress UI keeps working , then
-    // stashes the fully-assembled file in the real cache in the background
-    // so the next load of the same model is instant.
+    // Cache-API shim for transformers.js: pass-through for small files,
+    // fetches+assembles chunked weight files from the CDN mirror. Caches
+    // the assembled file so the next load of the same model is instant.
     function getJsDelivrCache() {
       if (jsDelivrCache) return jsDelivrCache;
       const realCachePromise = ('caches' in self)
@@ -5183,7 +5104,7 @@ ${fromBody}`;
           let manifest;
           try {
             const mRes = await fetch(key + '.manifest.json');
-            if (!mRes.ok) return undefined; // not a chunked file , fall through to a normal fetch
+            if (!mRes.ok) return undefined; // not chunked, fall through
             manifest = await mRes.json();
           } catch {
             return undefined;
@@ -5202,7 +5123,7 @@ ${fromBody}`;
                     await cacheToStore.put(key, new Response(fullBlob, {
                       headers: { 'content-length': String(manifest.totalSize), 'content-type': 'application/octet-stream' },
                     }));
-                  } catch { /* best-effort caching only */ }
+                  } catch { /* ignore cache errors */ }
                 });
                 return;
               }
@@ -5227,7 +5148,7 @@ ${fromBody}`;
         async put(key, response) {
           const realCache = await realCachePromise;
           if (!realCache) return;
-          try { await realCache.put(key, response); } catch { /* best-effort caching only */ }
+          try { await realCache.put(key, response); } catch { /* ignore cache errors */ }
         },
       };
       return jsDelivrCache;
@@ -5236,12 +5157,14 @@ ${fromBody}`;
     async function loadPipeline(modelId, dtype, device, cdnFolder, task, onProgress) {
       if (!transformersMod) {
         transformersMod = await import(${JSON.stringify(TRANSFORMERS_CDN)});
-        // See the matching comment in the old main-thread version of this
-        // file: forcing single-threaded WASM avoids onnxruntime-web sizing
-        // its memory arena for a cross-origin-isolated thread count that
-        // isn't actually available, which otherwise fails the very first
-        // allocation on machines with plenty of free RAM.
+        // Force single-threaded WASM to avoid onnxruntime-web sizing its
+        // memory arena for unavailable cross-origin-isolated threads.
         transformersMod.env.backends.onnx.wasm.numThreads = 1;
+        transformersMod.env.backends.onnx.wasm.wasmMemory = {
+          initial: 6144,
+          maximum: 65536,
+          growth: true,
+        };
       }
       let pipelineModelId = modelId;
       if (cdnFolder) {
@@ -5330,8 +5253,7 @@ ${fromBody}`;
   }
   function unloadIdleModel() {
     idleUnloadTimer = null;
-    // Never discard a worker that's mid-load or mid-check , just push the
-    // check out and try again once whatever's running settles.
+    // Don't discard a worker mid-load or mid-check.
     if (state.checking || state.loading) { resetIdleUnloadTimer(); return; }
     const resident = Object.keys(state.pipelinesReady).find((k) => state.pipelinesReady[k]);
     if (!resident) return; // nothing loaded, nothing to free
@@ -5343,8 +5265,7 @@ ${fromBody}`;
   }
 
   function makeWorker() {
-    // Every replacement worker starts with a clean slate, so any pending
-    // idle-unload check from the worker being replaced is stale.
+    // Replacement workers start fresh; drop stale idle-unload timers.
     cancelIdleUnloadTimer();
     const blob = new Blob([WORKER_SRC], { type: 'text/javascript' });
     const url = URL.createObjectURL(blob);
@@ -5383,13 +5304,9 @@ ${fromBody}`;
     const resolver = loadResolvers[key];
     delete loadResolvers[key];
     if (errMessage) {
-      // A model can fail outright on a device whose real memory is smaller
-      // than the model needs. A failed allocation leaves onnxruntime-web's
-      // WASM memory maxed out (WebAssembly.Memory can grow but never
-      // shrink), so retrying anything else in that SAME worker would fail
-      // identically even though it loads fine on its own. Ditch the
-      // poisoned worker for a fresh one instead of reloading the whole page
-      // , no lost editor text, no jarring reload.
+      // Allocation failure poisons the worker's WASM memory (can grow but
+      // never shrink), so all subsequent allocations fail too. Get a fresh
+      // worker instead of reloading the page.
       console.warn(`Model "${key}" failed to load; marking unavailable:`, errMessage);
       state.unavailable[key] = true;
       try { sessionStorage.setItem(SKIP_KEY_PREFIX + key, '1'); } catch { /* storage unavailable; ignore */ }
@@ -5467,9 +5384,7 @@ ${fromBody}`;
 
   function renderTones() {
     toneRow.innerHTML = '';
-    // The Grammar model is fine-tuned for grammar correction only , it has
-    // no notion of "rewrite this more formally," so every tone but Deep Fix
-    // is locked out while it's selected rather than silently ignored.
+    // Grammar model only supports Deep Fix (text2text, no instruction following).
     const grammarOnly = MODELS[state.modelKey] && MODELS[state.modelKey].task === 'text2text-generation';
     TONES.forEach((t) => {
       const btn = document.createElement('button');
@@ -5501,9 +5416,7 @@ ${fromBody}`;
     if (!state.pipelinesReady[key] && state.loading !== key) ensureModel(key).catch(() => {});
   }
 
-  // Briefly shows a message in place of the Check button's normal label,
-  // then reverts , used for one-off notices (a model switch, a length
-  // guard) without needing a separate toast/notification UI.
+  // Flash a one-off message on the Check button, then revert.
   function flashCheckBtn(message, ms = 2200) {
     setProgressFill(0);
     aiProgressLabel.textContent = message;
@@ -5515,13 +5428,9 @@ ${fromBody}`;
     aiProgressFill.style.width = (pct == null ? 0 : Math.max(0, Math.min(100, pct))) + '%';
   }
 
-  // Rough proxy for how many tokens the reply will actually run , used only
-  // to size the progress bar's denominator, never sent to the model (the
-  // real max_new_tokens cap still governs generation). ~4 characters per
-  // token is a common enough English rule of thumb; Deep Fix and the other
-  // tones mostly preserve the input's length, but Expand deliberately grows
-  // it, so it gets a bigger multiplier. Clamped to the real cap since the
-  // model can never exceed it regardless of the estimate.
+  // Estimate output token count for progress bar denominator. ~4 chars/token
+  // is a rough English heuristic. Expand gets a 2.5x multiplier since it
+  // grows the text. Clamped to the real max_new_tokens cap.
   function estimateOutputTokens(sourceText, toneId, maxTokens) {
     const approxInputTokens = Math.max(8, Math.ceil(sourceText.length / 4));
     const factor = toneId === 'expand' ? 2.5 : 1.15;
@@ -5529,10 +5438,8 @@ ${fromBody}`;
     return Math.max(16, Math.min(maxTokens, est));
   }
 
-  // Rough ETA from "how far we've gotten" vs "how long that took": assumes
-  // a roughly constant rate from the start of this phase, which is good
-  // enough for a download/generation progress readout (not a promise of
-  // accuracy) without needing to track a rolling window of samples.
+  // Linear ETA: "how far we've gotten" vs "how long that took". Good enough
+  // for a progress readout without tracking a rolling sample window.
   function estimateEtaSeconds(startedAt, pct) {
     if (!startedAt || pct == null || pct <= 0) return null;
     const elapsedSec = (Date.now() - startedAt) / 1000;
@@ -5580,12 +5487,8 @@ ${fromBody}`;
     }
   }
 
-  /** The model is told to reply with only the corrected text, but small
-   *  instruct models sometimes ignore that and prepend a line like "Here is
-   *  the corrected version:" or wrap the answer in quotes/code fences. Left
-   *  alone, that stray text doesn't exist in the original, so the diff turns
-   *  it into a bogus "insert this phrase" suggestion card that would corrupt
-   *  the document if accepted. Strip the common shapes before diffing. */
+  /** Strip boilerplate preamble/instructions that some models prepend to
+   *  corrected text (would otherwise create bogus insert suggestions). */
   function stripPreamble(text) {
     let t = text;
     t = t.replace(/^```[a-z]*\n?/i, '').replace(/```\s*$/, '');
@@ -5622,35 +5525,22 @@ ${fromBody}`;
       : { max_new_tokens: 512, temperature: 0.7, do_sample: true };
     state.checking = true;
     state.genTokens = 0;
-    // The hard cap (max_new_tokens) is a ceiling the model rarely reaches ,
-    // Deep Fix and most tones stop at an EOS token once the corrected/rewritten
-    // text is done, usually close to the input's own length. Sizing the
-    // progress bar's denominator off the 512-token cap instead of that
-    // realistic length makes the bar (and its ETA) crawl at ~1% for the
-    // entire check, then jump straight to done. Estimate the likely output
-    // length instead so "N% done" , and the ETA derived from it , tracks
-    // where generation actually is.
+    // Estimate likely output length so the progress bar and ETA track
+    // actual generation instead of crawling at ~1% then jumping to done.
     state.genMaxTokens = estimateOutputTokens(source, tone.id, genOpts.max_new_tokens);
     state.checkStartedAt = Date.now();
     updateCheckBtn();
     try {
-      // The Grammar model is a plain text2text corrector, not an instruction
-      // follower , it takes the raw source text in and returns corrected
-      // text out, with no system/tone prompt wrapping it (there's nothing
-      // for it to "follow"; feeding it a prompt would just become text it
-      // tries to also "correct").
+      // Grammar model: plain text2text, no system/tone prompt wrapping.
       const genInput = MODELS[state.modelKey].task === 'text2text-generation'
         ? source
         : [
           { role: 'system', content: 'Reply with only the corrected/rewritten text. No preamble, no quotes, no explanation of what changed.' },
           { role: 'user', content: `${tone.instruction}\n\nTEXT:\n${source}` },
         ];
-      // Deep Fix is a correction pass, not creative writing: use low-temperature,
-      // near-greedy decoding so it doesn't introduce new wording on top of the
-      // actual errors. The stylistic tones keep some sampling for natural variety.
-      // state.modelKey may have changed since we started (a failed load
-      // switches to the other available model above), so re-read it now
-      // rather than use a stale copy.
+      // Deep Fix: low-temp, near-greedy to avoid introducing new wording.
+      // Stylistic tones keep some sampling for natural variety.
+      // Re-read modelKey since ensureModel() may have switched it.
       const modelKeyAtStart = state.modelKey;
       const text = await runGenerate(modelKeyAtStart, genInput, genOpts, () => {
         state.genTokens += 1;
@@ -5662,10 +5552,7 @@ ${fromBody}`;
       console.error(err);
     } finally {
       state.checking = false;
-      // The check just used the model; the idle clock starts fresh from
-      // here. (state.modelKey is read again rather than reusing a captured
-      // value, since ensureModel() above may run again before this settles;
-      // either way, only rearm the timer if something is actually resident.)
+      // Rearm idle timer if a model is still resident.
       if (Object.keys(state.pipelinesReady).some((k) => state.pipelinesReady[k])) resetIdleUnloadTimer();
       updateCheckBtn();
     }
@@ -5675,9 +5562,7 @@ ${fromBody}`;
   renderModelOptions();
   renderTones();
   updateCheckBtn();
-  // "Always there by default": start fetching the model in the background
-  // the moment the page loads, so Check is usually instant by the time
-  // someone actually clicks it, instead of requiring an explicit load step.
+  // Pre-fetch model on load so Check is usually instant on first click.
   ensureModel(state.modelKey).catch(() => {});
 })();
 

@@ -1,36 +1,15 @@
 <!doctype html>
 <!--
-  Emend bootloader
-  -----------------
-  Paste this wherever you need a live copy of Emend (any HTML-accepting
-  box: an online previewer, a CodePen, a wiki embed, whatever).
+  Emend bootloader, paste into any HTML-accepting box to get a live copy.
 
-  Two jsDelivr quirks this file works around:
-
-  1. jsDelivr serves .html files from GitHub with a `text/plain`
-     content-type (a known, long-standing quirk of their Cloudflare-fronted
-     infra, not something fixable from the repo side), so a plain
-     `src="...emendapp.html"` iframe would show raw source text instead of
-     rendering it. Fix: fetch the file as text (fetch() doesn't care about
-     Content-Type, only how you choose to consume the response), then hand
-     that text to an iframe via `srcdoc` instead of `src`. srcdoc renders
-     whatever string you give it as real HTML regardless of how it was
-     fetched, which sidesteps the bad header entirely.
-
-  2. jsDelivr's `@main` branch alias is a MUTABLE cache key: different edge
-     nodes (Cloudflare vs Fastly, different PoPs) can serve different cached
-     versions of the file for a while after a push, even after explicitly
-     purging (https://www.jsdelivr.com/tools/purge) -- confirmed live: three
-     different edge nodes served three different file sizes for the same
-     `@main` URL, minutes after a purge reported "finished". A jsDelivr URL
-     pinned to an exact commit SHA is immutable and doesn't have this
-     problem -- every edge that has ever fetched that exact SHA's file
-     serves the exact same bytes, forever, with no ambiguity. So on every
-     load this file first asks GitHub's API for the current HEAD commit of
-     main, then builds a commit-pinned jsDelivr URL from that -- always the
-     true latest content, never a stale or split-brained edge cache. If the
-     API call fails for any reason (offline, rate-limited), it falls back to
-     the plain @main URL rather than failing outright.
+  Works around two jsDelivr quirks:
+  1. jsDelivr serves .html files from GitHub as text/plain, so an iframe
+     with src="...emendapp.html" would show raw source. Fix: fetch as text,
+     then hand to the iframe via srcdoc (renders as real HTML regardless).
+  2. The @main branch alias is a mutable cache key, so different edge nodes
+     can serve stale versions after a push. Fix: query the GitHub API for
+     the current HEAD SHA and build a commit-pinned jsDelivr URL. Falls
+     back to @main if the API call fails.
 -->
 <html lang="en">
 <head>
@@ -60,8 +39,6 @@
     var iframe = document.createElement('iframe');
     iframe.title = 'Emend , offline spelling & grammar checker';
     iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
-    // srcdoc renders this string as a real document regardless of the
-    // Content-Type the bytes were originally served with.
     iframe.srcdoc = html;
     document.body.innerHTML = '';
     document.body.appendChild(iframe);
@@ -74,8 +51,7 @@
     });
   }
 
-  // Resolve the current HEAD commit so we can use an immutable, never-stale
-  // jsDelivr URL instead of the flaky @main alias (see comment above).
+  // Resolve current HEAD so we use an immutable commit-pinned URL (see above).
   fetch('https://api.github.com/repos/' + REPO + '/commits/main', { cache: 'no-store' })
     .then(function (res) {
       if (!res.ok) throw new Error('GitHub API HTTP ' + res.status);
@@ -88,9 +64,7 @@
       return loadFrom(pinnedUrl);
     })
     .catch(function (err) {
-      // GitHub API unreachable/rate-limited: fall back to the mutable
-      // @main URL. Slight risk of a stale edge cache, but better than
-      // failing to load at all.
+      // API unreachable or rate-limited: fall back to @main.
       console.warn('Falling back to @main (could not resolve commit pin):', err);
       return loadFrom(FALLBACK_URL);
     })
