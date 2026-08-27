@@ -153,6 +153,49 @@ body{
 }
 .mode-tabs button.active{background:var(--accent-soft);color:var(--accent);}
 
+.scan-overlay{
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  overflow:hidden;
+  z-index:10;
+}
+.scan-line{
+  position:absolute;
+  left:0;right:0;
+  height:2px;
+  background:linear-gradient(90deg,transparent 0%,var(--accent) 30%,var(--accent) 70%,transparent 100%);
+  box-shadow:0 0 8px var(--accent),0 0 20px var(--accent);
+  opacity:0;
+  transition:opacity .3s;
+}
+.scan-line.active{
+  opacity:1;
+  animation:scanSweep 1.8s ease-in-out infinite;
+}
+@keyframes scanSweep{
+  0%{top:0%;}
+  50%{top:calc(100% - 2px);}
+  100%{top:0%;}
+}
+
+.custom-instruction-wrap{
+  width:100%;
+  padding:0 7px 4px;
+}
+.custom-instruction-wrap textarea{
+  width:100%;
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:6px 8px;
+  font-size:12px;
+  font-family:var(--font-ui);
+  background:var(--panel-2);
+  color:var(--text);
+  resize:vertical;
+  min-height:36px;
+}
+
 select#dialect{
   border:1px solid var(--border);
   border-radius:7px;
@@ -444,10 +487,17 @@ select#fontSelect{
     </select>
 
     <div class="mode-tabs" id="modeTabs">
-      <button data-mode="all" class="active">All</button>
-      <button data-mode="correctness">Correctness</button>
-      <button data-mode="clarity">Clarity</button>
-      <button data-mode="engagement">Engagement</button>
+      <button data-tone="general" class="active">General</button>
+      <button data-tone="formal">Formal</button>
+      <button data-tone="casual">Casual</button>
+      <button data-tone="concise">Concise</button>
+      <button data-tone="fluent">Fluent</button>
+      <button data-tone="expand">Expand</button>
+      <button data-tone="simplify">Simplify</button>
+      <button data-tone="custom">Custom</button>
+    </div>
+    <div class="custom-instruction-wrap" id="customInstructionWrap" style="display:none">
+      <textarea id="customInstructionInput" rows="2" placeholder="Tell Emend your style..."></textarea>
     </div>
 
     <div class="topbar-spacer"></div>
@@ -467,8 +517,6 @@ select#fontSelect{
         </select>
         <div class="label">AI model</div>
         <div class="row" id="aiModelList"></div>
-        <div class="label">AI mode</div>
-        <div class="row" id="aiToneRow"></div>
       </div>
     </div>
   </header>
@@ -484,6 +532,7 @@ select#fontSelect{
       </div>
       <div class="editor-wrap" id="editorWrap">
         <div id="highlights" class="layer highlights" aria-hidden="true"></div>
+        <div class="scan-overlay" id="scanOverlay"><div class="scan-line" id="scanLine"></div></div>
         <textarea id="editor" class="layer" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Type or paste your text here…"></textarea>
       </div>
       <div class="statusbar">
@@ -501,7 +550,7 @@ select#fontSelect{
       <div class="suggestions-header">
         <b id="issueCount">Ready to check</b>
         <div class="suggestions-header-actions">
-          <button class="btn ai ai-progress-btn small" id="checkBtn"><span class="ai-progress-fill" id="aiProgressFill"></span><span class="ai-progress-label" id="aiProgressLabel">Deep Check</span></button>
+          <button class="btn ai ai-progress-btn small" id="checkBtn"><span class="ai-progress-fill" id="aiProgressFill"></span><span class="ai-progress-label" id="aiProgressLabel">Run Check</span></button>
           <button class="btn small" id="acceptAllBtn" disabled>Accept all</button>
         </div>
       </div>
@@ -4536,7 +4585,6 @@ ${fromBody}`;
 
   /* State */
   const state = {
-    mode: 'all',           // all | correctness | clarity | engagement
     lints: [],              // full unfiltered list from engine + any AI-sourced ones
     activeId: null,
     engineReady: false,
@@ -4551,15 +4599,7 @@ ${fromBody}`;
   }
 
   function filteredLints() {
-    // Correctness is always shown; mode tabs only add style categories.
-    // AI fixes are always shown regardless of tab.
-    if (state.mode === 'all') return state.lints;
-    return state.lints.filter((l) => {
-      const g = groupOf(l.kind);
-      if (g === 'ai') return true;
-      if (state.mode === 'correctness') return g === 'correctness';
-      return g === 'correctness' || g === state.mode;
-    });
+    return state.lints;
   }
 
   /* Rendering */
@@ -4790,16 +4830,7 @@ ${fromBody}`;
     if (mark) selectLint(Number(mark.dataset.id));
   });
 
-  /* Toolbar */
-
-  modeTabs.addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-mode]');
-    if (!btn) return;
-    state.mode = btn.dataset.mode;
-    [...modeTabs.children].forEach((b) => b.classList.toggle('active', b === btn));
-    renderHighlights();
-    renderSuggestions();
-  });
+  /* Toolbar, tone tabs handled in AI module */
 
   dialectSelect.addEventListener('change', async () => {
     await engine.setDialect(dialectSelect.value);
@@ -5000,6 +5031,7 @@ ${fromBody}`;
   const DEFAULT_MODEL = 'gemma1b';
 
   const TONES = [
+    { id: 'general', label: 'General', instruction: 'Improve the text for clarity and natural flow, preserving its meaning and voice.' },
     { id: 'deepfix', label: 'Deep Fix', instruction: 'Carefully proofread the text and fix every grammar, spelling, punctuation, capitalization, and word-choice error you can find, using the full context of the passage to catch mistakes a simple rule-based spellchecker would miss (wrong word for the context, subtle subject-verb agreement, tense consistency across sentences, and so on). This is a correction pass, not a rewrite: keep the original wording, sentence structure, and meaning as close to the source as possible, and only change what is actually wrong.' },
     { id: 'formal', label: 'Formal', instruction: 'Rewrite the text to sound more formal and professional, preserving its full meaning.' },
     { id: 'casual', label: 'Casual', instruction: 'Rewrite the text in a relaxed, casual, conversational tone, preserving its full meaning.' },
@@ -5017,10 +5049,13 @@ ${fromBody}`;
 
   const $ = (s) => document.querySelector(s);
   const modelList = $('#aiModelList');
-  const toneRow = $('#aiToneRow');
   const checkBtn = $('#checkBtn');
   const aiProgressFill = $('#aiProgressFill');
   const aiProgressLabel = $('#aiProgressLabel');
+  const scanLine = $('#scanLine');
+  const customInstructionWrap = $('#customInstructionWrap');
+  const customInstructionInput = $('#customInstructionInput');
+  const modeTabs = $('#modeTabs');
 
   // Per-tab sessionStorage of models confirmed to fail on this device.
   // Belt-and-suspenders with state.unavailable (which is session-only).
@@ -5028,7 +5063,7 @@ ${fromBody}`;
 
   const state = {
     modelKey: DEFAULT_MODEL,
-    tone: 'deepfix',
+    tone: 'general',
     unavailable: {},       // modelKey -> true once confirmed to fail on this device
     pipelinesReady: {},    // modelKey -> true once loaded in the current worker
     loadPromises: {},      // modelKey -> in-flight load promise, so concurrent callers share one download
@@ -5318,9 +5353,9 @@ ${fromBody}`;
         const fallback = Object.keys(MODELS).find((k) => !state.unavailable[k]);
         if (fallback) {
           state.modelKey = fallback;
-          if (MODELS[fallback].task === 'text2text-generation') state.tone = 'deepfix';
+          if (MODELS[fallback].task === 'text2text-generation') state.tone = 'general';
           renderModelOptions();
-          renderTones();
+          renderToneTabs();
           ensureModel(fallback).then(
             () => { if (resolver) resolver.resolve(); },
             (err) => { if (resolver) resolver.reject(err); },
@@ -5366,7 +5401,13 @@ ${fromBody}`;
 
   /* -------------------------------- UI ------------------------------------ */
 
-  function currentTone() { return TONES.find((t) => t.id === state.tone) || TONES[0]; }
+  function currentTone() {
+    if (state.tone === 'custom') {
+      const customText = (customInstructionInput.value || '').trim();
+      return { id: 'custom', label: 'Custom', instruction: customText || 'Improve the text for clarity and natural flow, preserving its meaning and voice.' };
+    }
+    return TONES.find((t) => t.id === state.tone) || TONES[0];
+  }
 
   function renderModelOptions() {
     modelList.innerHTML = '';
@@ -5382,26 +5423,36 @@ ${fromBody}`;
     });
   }
 
-  function renderTones() {
-    toneRow.innerHTML = '';
-    // Grammar model only supports Deep Fix (text2text, no instruction following).
+  function renderToneTabs() {
     const grammarOnly = MODELS[state.modelKey] && MODELS[state.modelKey].task === 'text2text-generation';
-    TONES.forEach((t) => {
-      const btn = document.createElement('button');
-      const locked = grammarOnly && t.id !== 'deepfix';
-      btn.className = 'chip' + (state.tone === t.id ? ' active' : '');
-      btn.textContent = t.label;
-      if (locked) {
-        btn.disabled = true;
-        btn.style.opacity = '0.4';
-        btn.style.cursor = 'not-allowed';
-        btn.title = 'The Grammar model only supports Deep Fix , pick Gemma 1B for other tones.';
-      } else {
-        btn.addEventListener('click', () => { state.tone = t.id; renderTones(); });
-      }
-      toneRow.appendChild(btn);
+    [...modeTabs.children].forEach((btn) => {
+      const toneId = btn.dataset.tone;
+      const locked = grammarOnly && toneId !== 'general';
+      btn.classList.toggle('active', state.tone === toneId);
+      btn.disabled = locked;
+      btn.style.opacity = locked ? '0.4' : '';
+      btn.style.cursor = locked ? 'not-allowed' : '';
+      btn.title = locked ? 'The Grammar model only supports General tone, pick Gemma 1B for other tones.' : '';
     });
+    customInstructionWrap.style.display = state.tone === 'custom' ? '' : 'none';
   }
+
+  // Load persisted custom instruction
+  try {
+    const saved = localStorage.getItem('emend-custom-instruction');
+    if (saved) customInstructionInput.value = saved;
+  } catch { /* storage unavailable */ }
+
+  customInstructionInput.addEventListener('input', () => {
+    try { localStorage.setItem('emend-custom-instruction', customInstructionInput.value); } catch { /* ignore */ }
+  });
+
+  modeTabs.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-tone]');
+    if (!btn || btn.disabled) return;
+    state.tone = btn.dataset.tone;
+    renderToneTabs();
+  });
 
   function selectModel(key) {
     if (state.unavailable[key]) {
@@ -5409,9 +5460,9 @@ ${fromBody}`;
       return;
     }
     state.modelKey = key;
-    if (MODELS[key].task === 'text2text-generation') state.tone = 'deepfix';
+    if (MODELS[key].task === 'text2text-generation') state.tone = 'general';
     renderModelOptions();
-    renderTones();
+    renderToneTabs();
     updateCheckBtn();
     if (!state.pipelinesReady[key] && state.loading !== key) ensureModel(key).catch(() => {});
   }
@@ -5483,7 +5534,7 @@ ${fromBody}`;
     } else {
       checkBtn.disabled = false;
       setProgressFill(0);
-      aiProgressLabel.textContent = 'Deep Check';
+      aiProgressLabel.textContent = 'Run Check';
     }
   }
 
@@ -5519,12 +5570,14 @@ ${fromBody}`;
       return; // updateCheckBtn() already reflects the failure ("Retry AI")
     }
     const tone = currentTone();
-    const isFix = tone.id === 'deepfix';
+    const isGrammarModel = MODELS[state.modelKey].task === 'text2text-generation';
+    const isFix = tone.id === 'deepfix' || isGrammarModel;
     const genOpts = isFix
       ? { max_new_tokens: 512, temperature: 0.15, do_sample: false }
       : { max_new_tokens: 512, temperature: 0.7, do_sample: true };
     state.checking = true;
     state.genTokens = 0;
+    scanLine.classList.add('active');
     // Estimate likely output length so the progress bar and ETA track
     // actual generation instead of crawling at ~1% then jumping to done.
     state.genMaxTokens = estimateOutputTokens(source, tone.id, genOpts.max_new_tokens);
@@ -5552,6 +5605,7 @@ ${fromBody}`;
       console.error(err);
     } finally {
       state.checking = false;
+      scanLine.classList.remove('active');
       // Rearm idle timer if a model is still resident.
       if (Object.keys(state.pipelinesReady).some((k) => state.pipelinesReady[k])) resetIdleUnloadTimer();
       updateCheckBtn();
@@ -5560,7 +5614,7 @@ ${fromBody}`;
   checkBtn.addEventListener('click', doCheck);
 
   renderModelOptions();
-  renderTones();
+  renderToneTabs();
   updateCheckBtn();
   // Pre-fetch model on load so Check is usually instant on first click.
   ensureModel(state.modelKey).catch(() => {});
