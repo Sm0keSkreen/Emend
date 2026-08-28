@@ -5015,7 +5015,7 @@ ${fromBody}`;
     gemma1b: {
       id: 'onnx-community/gemma-3-1b-it-ONNX', label: 'Gemma 1B',
       meta: '~860MB · Google, general-purpose',
-      dtype: 'q4',
+      dtype: 'q4', cdnFolder: 'gemma1b',
     },
     // Grammar: fine-tuned T5-small for grammar correction only. Locked to
     // Deep Fix tone (no notion of "rewrite more formally"). Fraction of the
@@ -5060,6 +5060,7 @@ ${fromBody}`;
   // Per-tab sessionStorage of models confirmed to fail on this device.
   // Belt-and-suspenders with state.unavailable (which is session-only).
   const SKIP_KEY_PREFIX = 'emend-ai-skip-';
+  const SKIP_REASON_KEY_PREFIX = 'emend-ai-skip-reason-';
 
   const state = {
     modelKey: DEFAULT_MODEL,
@@ -5071,6 +5072,7 @@ ${fromBody}`;
     loadingPct: null,
     loadStartedAt: null,   // download start time for ETA
     loadError: null,
+    loadErrorMessages: {}, // modelKey -> raw error text from the worker, for the last load attempt
     checking: false,
     checkStartedAt: null,  // generation start time for ETA
     genTokens: 0,
@@ -5079,7 +5081,14 @@ ${fromBody}`;
 
   try {
     Object.keys(MODELS).forEach((k) => {
-      if (sessionStorage.getItem(SKIP_KEY_PREFIX + k) === '1') state.unavailable[k] = true;
+      if (sessionStorage.getItem(SKIP_KEY_PREFIX + k) === '1') {
+        state.unavailable[k] = true;
+        // The skip flag alone survives a reload; the reason text needs its
+        // own persisted copy too, or a re-opened tab shows the generic
+        // "Unavailable" message instead of the real cause.
+        const savedReason = sessionStorage.getItem(SKIP_REASON_KEY_PREFIX + k);
+        if (savedReason) state.loadErrorMessages[k] = savedReason;
+      }
     });
     if (state.unavailable[state.modelKey]) {
       const firstOk = Object.keys(MODELS).find((k) => !state.unavailable[k]);
@@ -5145,21 +5154,31 @@ ${fromBody}`;
             return undefined;
           }
           const baseUrl = key.slice(0, key.lastIndexOf('/') + 1);
-          const collected = [];
+          // For files under ~200MB, accumulate chunks so we can stash the
+          // assembled blob in Cache API for instant offline reloads. For
+          // larger files (Gemma 1B is ~860MB), accumulating every chunk
+          // into a second buffer while the ONNX runtime is also loading
+          // them causes peak memory to blow the tab, so the stream passes
+          // through directly without buffering, and we skip the cache write.
+          const LARGE_FILE_THRESHOLD = 200 * 1024 * 1024;
+          const shouldCollect = manifest.totalSize <= LARGE_FILE_THRESHOLD;
+          const collected = shouldCollect ? [] : null;
           let idx = 0;
           const stream = new ReadableStream({
             async pull(controller) {
               if (idx >= manifest.parts.length) {
                 controller.close();
-                realCachePromise.then(async (cacheToStore) => {
-                  if (!cacheToStore) return;
-                  try {
-                    const fullBlob = new Blob(collected);
-                    await cacheToStore.put(key, new Response(fullBlob, {
-                      headers: { 'content-length': String(manifest.totalSize), 'content-type': 'application/octet-stream' },
-                    }));
-                  } catch { /* ignore cache errors */ }
-                });
+                if (shouldCollect) {
+                  realCachePromise.then(async (cacheToStore) => {
+                    if (!cacheToStore) return;
+                    try {
+                      const fullBlob = new Blob(collected);
+                      await cacheToStore.put(key, new Response(fullBlob, {
+                        headers: { 'content-length': String(manifest.totalSize), 'content-type': 'application/octet-stream' },
+                      }));
+                    } catch { /* ignore cache errors */ }
+                  });
+                }
                 return;
               }
               const part = manifest.parts[idx++];
@@ -5169,7 +5188,7 @@ ${fromBody}`;
                 const buf = new Uint8Array(await res.arrayBuffer());
                 const hash = await sha256Hex(buf.buffer);
                 if (hash !== part.sha256) throw new Error('checksum mismatch for ' + part.name);
-                collected.push(buf);
+                if (shouldCollect) collected.push(buf);
                 controller.enqueue(buf);
               } catch (err) {
                 controller.error(new Error('CDN chunk fetch failed (' + part.name + '): ' + err.message));
@@ -5307,7 +5326,17 @@ ${fromBody}`;
     const w = new Worker(url, { type: 'module' });
     URL.revokeObjectURL(url);
     w.onmessage = onWorkerMessage;
-    w.onerror = (err) => console.error('AI worker error:', err);
+    w.onerror = (err) => {
+      console.error('AI worker error:', err);
+      const message = (err && (err.message || String(err))) || 'Unknown worker error';
+      // Errors that crash the worker script itself never make it through
+      // the normal postMessage load/generate error paths. Attribute to the
+      // model that was actively loading, if any.
+      if (state.loading) {
+        state.loadErrorMessages[state.loading] = message;
+        try { sessionStorage.setItem(SKIP_REASON_KEY_PREFIX + state.loading, message); } catch { /* ignore */ }
+      }
+    };
     return w;
   }
   worker = makeWorker();
@@ -5339,12 +5368,16 @@ ${fromBody}`;
     const resolver = loadResolvers[key];
     delete loadResolvers[key];
     if (errMessage) {
+      state.loadErrorMessages[key] = errMessage;
       // Allocation failure poisons the worker's WASM memory (can grow but
       // never shrink), so all subsequent allocations fail too. Get a fresh
       // worker instead of reloading the page.
       console.warn(`Model "${key}" failed to load; marking unavailable:`, errMessage);
       state.unavailable[key] = true;
-      try { sessionStorage.setItem(SKIP_KEY_PREFIX + key, '1'); } catch { /* storage unavailable; ignore */ }
+      try {
+        sessionStorage.setItem(SKIP_KEY_PREFIX + key, '1');
+        sessionStorage.setItem(SKIP_REASON_KEY_PREFIX + key, errMessage);
+      } catch { /* storage unavailable; ignore */ }
       worker.terminate();
       worker = makeWorker();
       state.pipelinesReady = {};
@@ -5365,6 +5398,7 @@ ${fromBody}`;
       }
       state.loadError = key;
       updateCheckBtn();
+      setStatus('error', errMessage);
       if (resolver) resolver.reject(new Error(errMessage));
       return;
     }
@@ -5418,6 +5452,9 @@ ${fromBody}`;
         + (state.modelKey === key ? ' selected' : '')
         + (unavailable ? ' unavailable' : '');
       div.innerHTML = `<span class="name">${m.label}</span><span class="meta">${unavailable ? 'Unavailable on this device' : m.meta}</span>`;
+      // Set via property (not baked into innerHTML) so an error message
+      // containing quotes or HTML-special characters can't break the markup.
+      if (unavailable && state.loadErrorMessages[key]) div.title = state.loadErrorMessages[key];
       div.addEventListener('click', () => selectModel(key));
       modelList.appendChild(div);
     });
@@ -5456,7 +5493,8 @@ ${fromBody}`;
 
   function selectModel(key) {
     if (state.unavailable[key]) {
-      flashCheckBtn(`${MODELS[key].label} isn't supported on this device.`);
+      const reason = state.loadErrorMessages[key];
+      flashCheckBtn(reason ? `${MODELS[key].label} isn't supported: ${reason}` : `${MODELS[key].label} isn't supported on this device.`, 3800);
       return;
     }
     state.modelKey = key;
@@ -5531,10 +5569,13 @@ ${fromBody}`;
       checkBtn.disabled = false;
       setProgressFill(0);
       aiProgressLabel.textContent = 'Retry AI';
+      const reason = state.loadErrorMessages[state.modelKey];
+      if (reason) checkBtn.title = 'Last error: ' + reason;
     } else {
       checkBtn.disabled = false;
       setProgressFill(0);
       aiProgressLabel.textContent = 'Run Check';
+      checkBtn.title = '';
     }
   }
 
@@ -5603,6 +5644,9 @@ ${fromBody}`;
       if (corrected) window.__app.applyAiHunks(source, corrected, baseOffset);
     } catch (err) {
       console.error(err);
+      const msg = (err && err.message) ? err.message : String(err);
+      flashCheckBtn('Check failed: ' + msg, 3800);
+      setStatus('error', msg);
     } finally {
       state.checking = false;
       scanLine.classList.remove('active');
@@ -5617,7 +5661,10 @@ ${fromBody}`;
   renderToneTabs();
   updateCheckBtn();
   // Pre-fetch model on load so Check is usually instant on first click.
-  ensureModel(state.modelKey).catch(() => {});
+  ensureModel(state.modelKey).catch((err) => {
+    // settleLoad already surfaces the failure via the button/status bar.
+    console.error('Pre-load of', state.modelKey, 'failed:', err);
+  });
 })();
 
 </script>
