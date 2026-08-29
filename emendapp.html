@@ -5023,7 +5023,7 @@ ${fromBody}`;
     // drops, so it gets a tighter input cap.
     grammar: {
       id: 'Xenova/grammar-synthesis-small', label: 'Grammar',
-      meta: '~95MB, dedicated grammar model , Deep Fix only',
+      meta: '~95MB, dedicated grammar model, Deep Fix only',
       dtype: 'q8', task: 'text2text-generation', maxCheckLength: 2000,
       cdnFolder: 'grammar',
     },
@@ -5602,7 +5602,7 @@ ${fromBody}`;
     if (!source.trim()) return;
     const maxLen = MODELS[state.modelKey].maxCheckLength || MAX_CHECK_LENGTH;
     if (source.length > maxLen) {
-      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model , try Gemma 1B' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
+      flashCheckBtn(maxLen < MAX_CHECK_LENGTH ? 'Text too long for Grammar model, try Gemma 1B' : 'Text too long', maxLen < MAX_CHECK_LENGTH ? 2600 : 1600);
       return;
     }
     try {
