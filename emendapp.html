@@ -5042,10 +5042,12 @@ ${fromBody}`;
   ];
 
   const MAX_CHECK_LENGTH = 20000;
-  // Idle timeout before discarding a loaded model to free WASM/GPU memory.
-  // 0 = unload immediately after the call stack clears (check still runs).
-  // Browser cache keeps weights, so next load is a quick reload, not re-download.
-  const IDLE_UNLOAD_MS = 0;
+  // A loaded model stays resident across checks, no idle-unload timer. The
+  // only thing that discards a worker is ensureModel() loading a different
+  // model than whatever's currently resident (see "Keep at most one model
+  // resident at a time" below), so switching models is the one thing that
+  // frees the previous model's memory; running more checks with the same
+  // model never re-triggers a reload.
 
   const $ = (s) => document.querySelector(s);
   const modelList = $('#aiModelList');
@@ -5297,30 +5299,7 @@ ${fromBody}`;
   let workerReqSeq = 0;
   const pendingGen = new Map(); // reqId -> { resolve, reject, onProgress }
 
-  let idleUnloadTimer = null;
-  function cancelIdleUnloadTimer() {
-    if (idleUnloadTimer) { clearTimeout(idleUnloadTimer); idleUnloadTimer = null; }
-  }
-  function resetIdleUnloadTimer() {
-    cancelIdleUnloadTimer();
-    idleUnloadTimer = setTimeout(unloadIdleModel, IDLE_UNLOAD_MS);
-  }
-  function unloadIdleModel() {
-    idleUnloadTimer = null;
-    // Don't discard a worker mid-load or mid-check.
-    if (state.checking || state.loading) { resetIdleUnloadTimer(); return; }
-    const resident = Object.keys(state.pipelinesReady).find((k) => state.pipelinesReady[k]);
-    if (!resident) return; // nothing loaded, nothing to free
-    worker.terminate();
-    worker = makeWorker();
-    state.pipelinesReady = {};
-    renderModelOptions();
-    updateCheckBtn();
-  }
-
   function makeWorker() {
-    // Replacement workers start fresh; drop stale idle-unload timers.
-    cancelIdleUnloadTimer();
     const blob = new Blob([WORKER_SRC], { type: 'text/javascript' });
     const url = URL.createObjectURL(blob);
     const w = new Worker(url, { type: 'module' });
@@ -5347,7 +5326,6 @@ ${fromBody}`;
       if (state.loading === msg.key) { state.loadingPct = msg.pct; updateCheckBtn(); }
     } else if (msg.type === 'loadDone') {
       state.pipelinesReady[msg.key] = true;
-      resetIdleUnloadTimer();
       settleLoad(msg.key, null);
     } else if (msg.type === 'loadError') {
       settleLoad(msg.key, msg.message);
@@ -5408,6 +5386,22 @@ ${fromBody}`;
   function ensureModel(key) {
     if (state.pipelinesReady[key]) return Promise.resolve();
     if (state.loadPromises[key]) return state.loadPromises[key];
+
+    // Keep at most one model resident at a time. Loading a second model on
+    // top of an already-loaded one pushes total WASM/GPU memory over the
+    // device's ceiling. Free whatever's loaded before pulling in a new model.
+    const otherResident = Object.keys(state.pipelinesReady).find((k) => state.pipelinesReady[k] && k !== key);
+    if (otherResident) {
+      Object.keys(loadResolvers).forEach((k) => {
+        const r = loadResolvers[k];
+        delete loadResolvers[k];
+        if (r) r.reject(new Error('cancelled: switching models'));
+      });
+      worker.terminate();
+      worker = makeWorker();
+      state.pipelinesReady = {};
+    }
+
     const m = MODELS[key];
     state.loading = key;
     state.loadingPct = null;
@@ -5650,8 +5644,6 @@ ${fromBody}`;
     } finally {
       state.checking = false;
       scanLine.classList.remove('active');
-      // Rearm idle timer if a model is still resident.
-      if (Object.keys(state.pipelinesReady).some((k) => state.pipelinesReady[k])) resetIdleUnloadTimer();
       updateCheckBtn();
     }
   }
